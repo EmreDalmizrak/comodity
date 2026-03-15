@@ -1,16 +1,15 @@
 """
 Commodity Monte Carlo Simulation — Iran-Israel Conflict Risk
-Streamlit App
+Streamlit App  |  Live prices via yfinance
 Run: streamlit run app.py
 """
 
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 import streamlit as st
-from typing import Optional
+from datetime import datetime, timedelta
 
 # ─────────────────────────────────────────────
 #  Page Config
@@ -24,82 +23,78 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────
-#  Custom CSS
+#  CSS
 # ─────────────────────────────────────────────
 
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
-
 html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
-
 .hero-banner {
     background: linear-gradient(135deg, #0d1117 0%, #161b22 50%, #0d1117 100%);
-    border: 1px solid #30363d;
-    border-radius: 12px;
-    padding: 2rem 2.5rem;
-    margin-bottom: 1.5rem;
-    position: relative;
-    overflow: hidden;
+    border: 1px solid #30363d; border-radius: 12px;
+    padding: 2rem 2.5rem; margin-bottom: 1.5rem;
+    position: relative; overflow: hidden;
 }
 .hero-banner::before {
-    content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0; height: 2px;
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
     background: linear-gradient(90deg, #e24b4a, #f0993b, #185fa5, #1d9e75);
 }
-.hero-title {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 1.6rem; font-weight: 600;
-    color: #e6edf3; margin: 0 0 0.3rem;
+.hero-title { font-family:'IBM Plex Mono',monospace; font-size:1.6rem; font-weight:600; color:#e6edf3; margin:0 0 0.3rem; }
+.hero-sub   { font-size:0.85rem; color:#8b949e; margin:0; font-family:'IBM Plex Mono',monospace; }
+.live-badge {
+    display:inline-flex; align-items:center; gap:6px;
+    background:#1a2e22; border:1px solid #1d9e75; border-radius:99px;
+    padding:4px 12px; font-size:11px; font-family:'IBM Plex Mono',monospace;
+    color:#5ecc8e; letter-spacing:0.5px; margin-bottom:1rem;
 }
-.hero-sub {
-    font-size: 0.85rem; color: #8b949e; margin: 0;
-    font-family: 'IBM Plex Mono', monospace;
+.live-dot { width:7px; height:7px; background:#1d9e75; border-radius:50%; animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+.metric-row { display:flex; gap:12px; margin-bottom:1.2rem; flex-wrap:wrap; }
+.metric-card { flex:1; min-width:130px; background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px 16px; }
+.metric-card.up   { border-top:2px solid #1d9e75; }
+.metric-card.down { border-top:2px solid #e24b4a; }
+.metric-card.info { border-top:2px solid #185fa5; }
+.metric-card.warn { border-top:2px solid #f0993b; }
+.metric-label { font-size:11px; color:#8b949e; font-family:'IBM Plex Mono',monospace; letter-spacing:0.5px; margin-bottom:4px; }
+.metric-val   { font-size:1.4rem; font-weight:600; color:#e6edf3; font-family:'IBM Plex Mono',monospace; }
+.metric-delta { font-size:11px; margin-top:2px; font-family:'IBM Plex Mono',monospace; }
+.delta-up  { color:#1d9e75; } .delta-down { color:#e24b4a; } .delta-neu { color:#8b949e; }
+.price-row { display:flex; gap:10px; margin-bottom:1.2rem; flex-wrap:wrap; }
+.price-card {
+    flex:1; min-width:160px; background:#161b22; border:1px solid #30363d;
+    border-radius:8px; padding:12px 16px;
+    display:flex; justify-content:space-between; align-items:center;
 }
-.metric-row { display: flex; gap: 12px; margin-bottom: 1.2rem; flex-wrap: wrap; }
-.metric-card {
-    flex: 1; min-width: 130px;
-    background: #161b22; border: 1px solid #30363d;
-    border-radius: 8px; padding: 14px 16px;
-}
-.metric-card.up   { border-top: 2px solid #1d9e75; }
-.metric-card.down { border-top: 2px solid #e24b4a; }
-.metric-card.info { border-top: 2px solid #185fa5; }
-.metric-card.warn { border-top: 2px solid #f0993b; }
-.metric-label { font-size: 11px; color: #8b949e; font-family: 'IBM Plex Mono', monospace; letter-spacing: 0.5px; margin-bottom: 4px; }
-.metric-val   { font-size: 1.4rem; font-weight: 600; color: #e6edf3; font-family: 'IBM Plex Mono', monospace; }
-.metric-delta { font-size: 11px; margin-top: 2px; font-family: 'IBM Plex Mono', monospace; }
-.delta-up   { color: #1d9e75; }
-.delta-down { color: #e24b4a; }
-.delta-neu  { color: #8b949e; }
+.price-name { font-size:12px; color:#8b949e; font-family:'IBM Plex Mono',monospace; }
+.price-val  { font-size:1.2rem; font-weight:600; color:#e6edf3; font-family:'IBM Plex Mono',monospace; }
+.price-chg-up   { font-size:11px; color:#1d9e75; font-family:'IBM Plex Mono',monospace; }
+.price-chg-down { font-size:11px; color:#e24b4a; font-family:'IBM Plex Mono',monospace; }
 .scenario-badge {
-    display: inline-block; padding: 4px 12px; border-radius: 99px;
-    font-size: 12px; font-family: 'IBM Plex Mono', monospace;
-    font-weight: 600; letter-spacing: 0.5px; margin-bottom: 1rem;
+    display:inline-block; padding:4px 12px; border-radius:99px;
+    font-size:12px; font-family:'IBM Plex Mono',monospace;
+    font-weight:600; letter-spacing:0.5px; margin-bottom:1rem;
 }
 .sc-base   { background:#1c2e3a; color:#5ea8e0; border:1px solid #185fa5; }
 .sc-mild   { background:#2e2418; color:#e0a84a; border:1px solid #ba7517; }
 .sc-strait { background:#2e1a1a; color:#e07070; border:1px solid #a32d2d; }
 .sc-deesc  { background:#1a2e22; color:#5ecc8e; border:1px solid #1d9e75; }
 .section-hdr {
-    font-family: 'IBM Plex Mono', monospace; font-size: 11px;
-    letter-spacing: 2px; color: #8b949e; text-transform: uppercase;
-    margin: 1.2rem 0 0.6rem; border-bottom: 1px solid #21262d; padding-bottom: 6px;
+    font-family:'IBM Plex Mono',monospace; font-size:11px;
+    letter-spacing:2px; color:#8b949e; text-transform:uppercase;
+    margin:1.2rem 0 0.6rem; border-bottom:1px solid #21262d; padding-bottom:6px;
 }
 .stats-tbl { width:100%; border-collapse:collapse; font-size:13px; }
 .stats-tbl th { text-align:left; padding:7px 10px; color:#8b949e; font-family:'IBM Plex Mono',monospace; font-size:11px; letter-spacing:1px; border-bottom:1px solid #21262d; font-weight:500; }
 .stats-tbl td { padding:7px 10px; color:#e6edf3; border-bottom:1px solid #161b22; font-family:'IBM Plex Mono',monospace; font-size:12px; }
-.tbl-up   { color: #1d9e75 !important; }
-.tbl-down { color: #e24b4a !important; }
-.tbl-neu  { color: #8b949e !important; }
-section[data-testid="stSidebar"] { background: #0d1117; border-right: 1px solid #21262d; }
+.tbl-up   { color:#1d9e75 !important; } .tbl-down { color:#e24b4a !important; } .tbl-neu { color:#8b949e !important; }
+section[data-testid="stSidebar"] { background:#0d1117; border-right:1px solid #21262d; }
 .stButton>button {
-    background: #161b22 !important; border: 1px solid #30363d !important;
-    color: #e6edf3 !important; font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 13px !important; border-radius: 6px !important; width: 100%;
+    background:#161b22 !important; border:1px solid #30363d !important;
+    color:#e6edf3 !important; font-family:'IBM Plex Mono',monospace !important;
+    font-size:13px !important; border-radius:6px !important; width:100%;
 }
-.stButton>button:hover { border-color: #58a6ff !important; color: #58a6ff !important; }
+.stButton>button:hover { border-color:#58a6ff !important; color:#58a6ff !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -108,41 +103,57 @@ section[data-testid="stSidebar"] { background: #0d1117; border-right: 1px solid 
 #  Constants
 # ─────────────────────────────────────────────
 
-COMMODITIES = {
-    "Crude Oil (WTI)": {"symbol": "OIL",  "spot": 85.00,  "unit": "$", "decimals": 2, "default_drift": 0.05, "default_sigma": 0.28},
-    "Natural Gas":     {"symbol": "GAS",  "spot": 2.80,   "unit": "$", "decimals": 3, "default_drift": 0.02, "default_sigma": 0.55},
-    "Gold":            {"symbol": "GOLD", "spot": 2340.0, "unit": "$", "decimals": 0, "default_drift": 0.06, "default_sigma": 0.15},
+COMMODITY_META = {
+    "Crude Oil (WTI)": {
+        "symbol": "OIL", "ticker": "CL=F",
+        "unit": "$", "decimals": 2,
+        "fallback_spot": 85.00,
+        "fallback_drift": 0.05, "fallback_sigma": 0.28,
+    },
+    "Natural Gas": {
+        "symbol": "GAS", "ticker": "NG=F",
+        "unit": "$", "decimals": 3,
+        "fallback_spot": 2.80,
+        "fallback_drift": 0.02, "fallback_sigma": 0.55,
+    },
+    "Gold": {
+        "symbol": "GOLD", "ticker": "GC=F",
+        "unit": "$", "decimals": 0,
+        "fallback_spot": 2340.0,
+        "fallback_drift": 0.06, "fallback_sigma": 0.15,
+    },
 }
 
 SCENARIOS = {
     "Base Case": {
-        "esc_prob": 0.03, "shock_mag": 0.08, "strait_prob": 0.02, "mean_rev": 0.05,
-        "drift_adj": 0.00, "sigma_adj": 0.00,
-        "badge_class": "sc-base", "emoji": "🔵",
-        "description": "Low-level tension, current market dynamics prevail.",
+        "esc_prob":0.03,"shock_mag":0.08,"strait_prob":0.02,"mean_rev":0.05,
+        "drift_adj":0.00,"sigma_adj":0.00,
+        "badge_class":"sc-base","emoji":"🔵",
+        "description":"Low-level tension, current market dynamics prevail.",
     },
     "Mild Escalation": {
-        "esc_prob": 0.08, "shock_mag": 0.15, "strait_prob": 0.05, "mean_rev": 0.04,
-        "drift_adj": 0.03, "sigma_adj": 0.10,
-        "badge_class": "sc-mild", "emoji": "🟡",
-        "description": "Increased airstrikes, regional risk premium builds.",
+        "esc_prob":0.08,"shock_mag":0.15,"strait_prob":0.05,"mean_rev":0.04,
+        "drift_adj":0.03,"sigma_adj":0.10,
+        "badge_class":"sc-mild","emoji":"🟡",
+        "description":"Increased airstrikes, regional risk premium builds.",
     },
     "Strait Closure": {
-        "esc_prob": 0.15, "shock_mag": 0.28, "strait_prob": 0.15, "mean_rev": 0.02,
-        "drift_adj": 0.10, "sigma_adj": 0.25,
-        "badge_class": "sc-strait", "emoji": "🔴",
-        "description": "Hormuz blocked — severe supply disruption scenario.",
+        "esc_prob":0.15,"shock_mag":0.28,"strait_prob":0.15,"mean_rev":0.02,
+        "drift_adj":0.10,"sigma_adj":0.25,
+        "badge_class":"sc-strait","emoji":"🔴",
+        "description":"Hormuz blocked — severe supply disruption scenario.",
     },
     "De-escalation": {
-        "esc_prob": 0.01, "shock_mag": 0.04, "strait_prob": 0.005, "mean_rev": 0.12,
-        "drift_adj": -0.05, "sigma_adj": -0.08,
-        "badge_class": "sc-deesc", "emoji": "🟢",
-        "description": "Ceasefire / diplomacy — risk premium deflates.",
+        "esc_prob":0.01,"shock_mag":0.04,"strait_prob":0.005,"mean_rev":0.12,
+        "drift_adj":-0.05,"sigma_adj":-0.08,
+        "badge_class":"sc-deesc","emoji":"🟢",
+        "description":"Ceasefire / diplomacy — risk premium deflates.",
     },
 }
 
 STRAIT_IMPACT = {"OIL": 0.20, "GAS": 0.25, "GOLD": 0.08}
 
+# Chart colours
 BG   = "#0d1117"
 BG2  = "#161b22"
 GRID = "#21262d"
@@ -155,17 +166,51 @@ AMB  = "#f0993b"
 
 
 # ─────────────────────────────────────────────
-#  Simulation Engine
+#  Live data fetch  (cached 15 min)
+# ─────────────────────────────────────────────
+
+@st.cache_data(ttl=900, show_spinner=False)   # refresh every 15 minutes
+def fetch_live_data(ticker: str, fallback_spot: float,
+                    fallback_drift: float, fallback_sigma: float):
+    """
+    Fetch latest price + calibrate drift & sigma from 1 year of history.
+    Returns (spot, drift, sigma, prev_close, pct_change, history_closes, last_updated, source)
+    Falls back to hard-coded defaults if yfinance fails.
+    """
+    try:
+        import yfinance as yf
+        tk   = yf.Ticker(ticker)
+        hist = tk.history(period="1y")
+
+        if hist.empty or len(hist) < 5:
+            raise ValueError("Not enough data")
+
+        closes      = hist["Close"].dropna()
+        spot        = float(closes.iloc[-1])
+        prev_close  = float(closes.iloc[-2])
+        pct_chg     = (spot / prev_close - 1) * 100
+
+        log_ret     = np.log(closes / closes.shift(1)).dropna()
+        ann_sigma   = float(log_ret.std()  * np.sqrt(252))
+        ann_drift   = float(log_ret.mean() * 252)
+
+        last_updated = datetime.now().strftime("%H:%M:%S")
+        return spot, ann_drift, ann_sigma, prev_close, pct_chg, closes.tolist(), last_updated, "live"
+
+    except Exception:
+        # silent fallback — app still works without internet
+        return (fallback_spot, fallback_drift, fallback_sigma,
+                fallback_spot, 0.0, [], "N/A (offline)", "fallback")
+
+
+# ─────────────────────────────────────────────
+#  Simulation
 # ─────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
-def run_mc(
-    spot: float, drift: float, sigma: float,
-    esc_prob: float, shock_mag: float,
-    strait_prob: float, mean_rev: float,
-    strait_impact: float,
-    n_paths: int, horizon: int, seed: int, symbol: str,
-) -> np.ndarray:
+def run_mc(spot, drift, sigma, esc_prob, shock_mag,
+           strait_prob, mean_rev, strait_impact,
+           n_paths, horizon, seed, symbol):
     rng = np.random.default_rng(seed)
     dt  = 1.0 / 252.0
     S0  = spot
@@ -180,8 +225,8 @@ def run_mc(
         dS  = S * ((drift - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * Z)
         dS += -mean_rev * (S - S0) * dt
 
-        esc_mask  = rng.random(n_paths) < esc_prob * dt
-        dS       += S * shock_mag * (0.5 + rng.random(n_paths)) * esc_mask
+        esc_mask = rng.random(n_paths) < esc_prob * dt
+        dS      += S * shock_mag * (0.5 + rng.random(n_paths)) * esc_mask
 
         new_close      = (~strait_closed) & (rng.random(n_paths) < strait_prob * dt)
         strait_closed |= new_close
@@ -193,7 +238,7 @@ def run_mc(
     return paths
 
 
-def compute_stats(paths: np.ndarray, spot: float) -> dict:
+def compute_stats(paths, spot):
     final = paths[:, -1]
     T     = paths.shape[1] - 1
     p5    = np.percentile(final, 5)
@@ -222,24 +267,41 @@ def compute_stats(paths: np.ndarray, spot: float) -> dict:
 
 def mpl_dark():
     plt.rcParams.update({
-        "figure.facecolor":  BG,
-        "axes.facecolor":    BG2,
-        "axes.edgecolor":    GRID,
-        "axes.labelcolor":   MUT,
-        "axes.titlecolor":   TEXT,
-        "xtick.color":       MUT,
-        "ytick.color":       MUT,
-        "grid.color":        GRID,
-        "grid.linewidth":    0.6,
-        "text.color":        TEXT,
-        "font.family":       "monospace",
-        "axes.spines.top":   False,
-        "axes.spines.right": False,
+        "figure.facecolor": BG, "axes.facecolor": BG2,
+        "axes.edgecolor": GRID, "axes.labelcolor": MUT,
+        "axes.titlecolor": TEXT, "xtick.color": MUT, "ytick.color": MUT,
+        "grid.color": GRID, "grid.linewidth": 0.6,
+        "text.color": TEXT, "font.family": "monospace",
+        "axes.spines.top": False, "axes.spines.right": False,
     })
 
 
-def plot_paths(paths, spot, name, unit, dec, horizon):
+def plot_history_and_paths(hist_closes, paths, spot, name, unit, dec, horizon):
     mpl_dark()
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4), facecolor=BG,
+                             gridspec_kw={"width_ratios": [1, 1.6]})
+
+    # ── Left: historical prices ──
+    ax0 = axes[0]
+    if hist_closes:
+        ax0.plot(hist_closes, color=BLUE, lw=1.5, alpha=0.9)
+        ax0.axhline(spot, color=AMB, lw=1, ls="--", alpha=0.8)
+        ax0.set_title("1-Year Historical Price", fontsize=10)
+        ax0.set_xlabel("Trading days", fontsize=9)
+        ax0.set_ylabel(f"Price ({unit})", fontsize=9)
+        ax0.grid(True, alpha=0.3)
+        # shade last point
+        ax0.scatter(len(hist_closes)-1, spot, color=AMB, s=40, zorder=5)
+        ax0.text(len(hist_closes)-1, spot, f"  {unit}{spot:,.{dec}f}",
+                 color=AMB, fontsize=8, va="bottom")
+    else:
+        ax0.text(0.5, 0.5, "Live data\nunavailable\n(fallback mode)",
+                 ha="center", va="center", transform=ax0.transAxes,
+                 fontsize=10, color="#555")
+        ax0.set_title("Historical Price", fontsize=10)
+
+    # ── Right: simulated paths ──
+    ax1 = axes[1]
     days = np.arange(horizon + 1)
     p5   = np.percentile(paths, 5,  axis=0)
     p25  = np.percentile(paths, 25, axis=0)
@@ -247,18 +309,17 @@ def plot_paths(paths, spot, name, unit, dec, horizon):
     p75  = np.percentile(paths, 75, axis=0)
     p95  = np.percentile(paths, 95, axis=0)
 
-    fig, ax = plt.subplots(figsize=(9, 4), facecolor=BG)
-    ax.fill_between(days, p5,  p95, alpha=0.10, color=BLUE)
-    ax.fill_between(days, p25, p75, alpha=0.24, color=BLUE)
-    ax.plot(days, med, color=BLUE, lw=2.2)
-    ax.plot(days, p95, color=RED,  lw=1.2, ls="--", alpha=0.9)
-    ax.plot(days, p5,  color=GRN,  lw=1.2, ls="--", alpha=0.9)
-    ax.axhline(spot, color="#555", lw=1, ls=":", alpha=0.8)
+    ax1.fill_between(days, p5,  p95, alpha=0.10, color=BLUE)
+    ax1.fill_between(days, p25, p75, alpha=0.24, color=BLUE)
+    ax1.plot(days, med, color=BLUE, lw=2.2)
+    ax1.plot(days, p95, color=RED,  lw=1.2, ls="--", alpha=0.9)
+    ax1.plot(days, p5,  color=GRN,  lw=1.2, ls="--", alpha=0.9)
+    ax1.axhline(spot, color="#555", lw=1, ls=":", alpha=0.8)
 
-    ax.set_xlabel("Trading days", fontsize=9)
-    ax.set_ylabel(f"Price ({unit})", fontsize=9)
-    ax.set_title(f"{name} — Simulated Price Paths ({paths.shape[0]:,} paths)", fontsize=11)
-    ax.grid(True, alpha=0.4)
+    ax1.set_xlabel("Trading days (forecast)", fontsize=9)
+    ax1.set_ylabel(f"Price ({unit})", fontsize=9)
+    ax1.set_title(f"Monte Carlo — {paths.shape[0]:,} Paths", fontsize=10)
+    ax1.grid(True, alpha=0.4)
 
     legend_els = [
         Line2D([0],[0], color=BLUE, lw=2,   label="Median"),
@@ -267,8 +328,10 @@ def plot_paths(paths, spot, name, unit, dec, horizon):
         Patch(fc=BLUE, alpha=0.24, label="50% CI"),
         Patch(fc=BLUE, alpha=0.10, label="90% CI"),
     ]
-    ax.legend(handles=legend_els, fontsize=8, framealpha=0.3,
-              facecolor=BG2, edgecolor=GRID, loc="upper left")
+    ax1.legend(handles=legend_els, fontsize=8, framealpha=0.3,
+               facecolor=BG2, edgecolor=GRID, loc="upper left")
+
+    fig.suptitle(name, fontsize=12, fontweight="bold", color=TEXT)
     fig.tight_layout()
     return fig
 
@@ -281,22 +344,19 @@ def plot_distribution(paths, spot, name, unit, dec, horizon):
     fig, ax = plt.subplots(figsize=(9, 3.5), facecolor=BG)
     counts, edges = np.histogram(returns, bins=55)
     centers = (edges[:-1] + edges[1:]) / 2
-    bw      = edges[1] - edges[0]
+    bw = edges[1] - edges[0]
     bar_colors = [RED if c < -10 else GRN if c > 10 else BLUE for c in centers]
 
-    ax.bar(centers, counts, width=bw * 0.88,
-           color=bar_colors, alpha=0.82, edgecolor="none")
+    ax.bar(centers, counts, width=bw * 0.88, color=bar_colors, alpha=0.82, edgecolor="none")
     ax.axvline(0,                        color="#555", lw=1,   ls=":",  alpha=0.8)
     ax.axvline(np.median(returns),       color=BLUE,  lw=1.5, ls="--", alpha=0.9)
     ax.axvline(np.percentile(returns,5), color=RED,   lw=1.2, ls=":",  alpha=0.8)
 
-    legend_patches = [
+    ax.legend(handles=[
         Patch(fc=RED,  alpha=0.82, label="< -10%  (tail risk)"),
         Patch(fc=BLUE, alpha=0.82, label="-10% to +10%  (neutral)"),
         Patch(fc=GRN,  alpha=0.82, label="> +10%  (upside)"),
-    ]
-    ax.legend(handles=legend_patches, fontsize=8, framealpha=0.3,
-              facecolor=BG2, edgecolor=GRID, loc="upper left")
+    ], fontsize=8, framealpha=0.3, facecolor=BG2, edgecolor=GRID, loc="upper left")
 
     ax.set_xlabel(f"Return at day {horizon} (%)", fontsize=9)
     ax.set_ylabel("Frequency", fontsize=9)
@@ -310,25 +370,19 @@ def plot_scenario_compare(com_name, spot, base_drift, base_sigma,
                           strait_impact, n_paths, horizon, seed, symbol):
     mpl_dark()
     sc_colors = {
-        "Base Case":       BLUE,
-        "Mild Escalation": AMB,
-        "Strait Closure":  RED,
-        "De-escalation":   GRN,
+        "Base Case": BLUE, "Mild Escalation": AMB,
+        "Strait Closure": RED, "De-escalation": GRN,
     }
     fig, ax = plt.subplots(figsize=(9, 4), facecolor=BG)
     for sc_name, sc in SCENARIOS.items():
         d = base_drift + sc["drift_adj"]
         s = max(0.05, base_sigma + sc["sigma_adj"])
-        p = run_mc(
-            spot, d, s,
-            sc["esc_prob"], sc["shock_mag"],
-            sc["strait_prob"], sc["mean_rev"],
-            strait_impact,
-            min(n_paths, 500), horizon, seed, symbol,
-        )
-        med  = np.median(p, axis=0)
-        days = np.arange(len(med))
-        ax.plot(days, med, lw=2, color=sc_colors[sc_name], label=sc_name)
+        p = run_mc(spot, d, s,
+                   sc["esc_prob"], sc["shock_mag"],
+                   sc["strait_prob"], sc["mean_rev"],
+                   strait_impact, min(n_paths, 500), horizon, seed, symbol)
+        ax.plot(np.arange(p.shape[1]), np.median(p, axis=0),
+                lw=2, color=sc_colors[sc_name], label=sc_name)
 
     ax.axhline(spot, color="#555", lw=1, ls=":", alpha=0.8, label="Spot")
     ax.set_xlabel("Trading days", fontsize=9)
@@ -348,13 +402,12 @@ with st.sidebar:
     st.markdown("## SIMULATION")
     st.markdown("---")
 
-    commodity_name = st.selectbox("Commodity", list(COMMODITIES.keys()), index=0)
-    com = COMMODITIES[commodity_name]
+    commodity_name = st.selectbox("Commodity", list(COMMODITY_META.keys()), index=0)
+    meta = COMMODITY_META[commodity_name]
 
     st.markdown("### Scenario")
     scenario_name = st.radio(
-        "scenario_radio",
-        list(SCENARIOS.keys()),
+        "scenario_radio", list(SCENARIOS.keys()),
         format_func=lambda x: f"{SCENARIOS[x]['emoji']}  {x}",
         label_visibility="collapsed",
     )
@@ -362,20 +415,21 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### Simulation Params")
-    n_paths      = st.slider("Paths (N)",        100,  2000,  800, step=100)
-    horizon_days = st.slider("Horizon (days)",    30,   365,   90, step=5)
-    seed         = st.slider("Random seed",        0,   999,   42, step=1)
+    n_paths      = st.slider("Paths (N)",       100, 2000,  800, step=100)
+    horizon_days = st.slider("Horizon (days)",   30,  365,   90, step=5)
+    seed         = st.slider("Random seed",       0,  999,   42, step=1)
 
     st.markdown("---")
-    st.markdown("### Market Params")
-    drift = st.slider(
-        "Annual drift (%)", -30, 50,
-        int((com["default_drift"] + sc["drift_adj"]) * 100),
-    ) / 100.0
-    sigma = st.slider(
-        "Annual volatility (%)", 5, 100,
-        int(max(0.05, com["default_sigma"] + sc["sigma_adj"]) * 100),
-    ) / 100.0
+    if st.button("🔄  Refresh live prices"):
+        st.cache_data.clear()
+        st.rerun()
+
+    st.markdown("---")
+    st.markdown("### Override Market Params")
+    st.caption("Auto-filled from live data. Adjust if needed.")
+
+    override_drift = st.slider("Annual drift (%)",      -30, 50, int(sc["drift_adj"] * 100)) / 100.0
+    override_sigma = st.slider("Annual volatility (%)",   5, 100, int(max(0.05, meta["fallback_sigma"] + sc["sigma_adj"]) * 100)) / 100.0
 
     st.markdown("---")
     st.markdown("### Geopolitical Shocks")
@@ -384,32 +438,45 @@ with st.sidebar:
     strait_prob = st.slider("Strait closure prob. (%)",   0.0, 20.0, sc["strait_prob"]* 100, step=0.5) / 100
     mean_rev    = st.slider("Mean reversion (k)",         0.0,  0.3, sc["mean_rev"],          step=0.01)
 
-    strait_impact = STRAIT_IMPACT[com["symbol"]]
+    strait_impact = STRAIT_IMPACT[meta["symbol"]]
 
 
 # ─────────────────────────────────────────────
-#  Run simulation  —  result stored in "sim" (never "st"!)
+#  Fetch live data
+# ─────────────────────────────────────────────
+
+with st.spinner("Fetching live prices…"):
+    spot, live_drift, live_sigma, prev_close, pct_chg, hist_closes, last_updated, data_source = \
+        fetch_live_data(
+            meta["ticker"],
+            meta["fallback_spot"],
+            meta["fallback_drift"],
+            meta["fallback_sigma"],
+        )
+
+# Blend: live calibrated params + scenario adjustments + sidebar override
+drift = live_drift + sc["drift_adj"] + override_drift
+sigma = max(0.05, live_sigma + sc["sigma_adj"] + (override_sigma - meta["fallback_sigma"]))
+
+unit = meta["unit"]
+dec  = meta["decimals"]
+
+
+# ─────────────────────────────────────────────
+#  Run simulation
 # ─────────────────────────────────────────────
 
 paths = run_mc(
-    spot=com["spot"],
-    drift=drift,
-    sigma=sigma,
-    esc_prob=esc_prob,
-    shock_mag=shock_mag,
-    strait_prob=strait_prob,
-    mean_rev=mean_rev,
+    spot=spot, drift=drift, sigma=sigma,
+    esc_prob=esc_prob, shock_mag=shock_mag,
+    strait_prob=strait_prob, mean_rev=mean_rev,
     strait_impact=strait_impact,
-    n_paths=n_paths,
-    horizon=horizon_days,
-    seed=seed,
-    symbol=com["symbol"],
+    n_paths=n_paths, horizon=horizon_days,
+    seed=seed, symbol=meta["symbol"],
 )
 
-sim      = compute_stats(paths, com["spot"])   # <-- named "sim", NOT "st"
-spot_val = com["spot"]
-unit     = com["unit"]
-dec      = com["decimals"]
+sim      = compute_stats(paths, spot)
+spot_val = spot
 
 
 # ─────────────────────────────────────────────
@@ -423,53 +490,108 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# Live / fallback badge
+if data_source == "live":
+    st.markdown(f"""
+    <div class="live-badge">
+      <span class="live-dot"></span>
+      LIVE PRICES &nbsp;·&nbsp; Last updated {last_updated} &nbsp;·&nbsp; Auto-refresh 15 min
+    </div>
+    """, unsafe_allow_html=True)
+else:
+    st.warning("⚠️  Could not reach Yahoo Finance — using fallback prices. Check internet connection.")
+
+# Scenario badge
 bc = sc["badge_class"]
 st.markdown(f"""
 <span class="scenario-badge {bc}">{sc['emoji']}  {scenario_name.upper()}</span>
-<p style="color:#8b949e; font-size:13px; margin-top:-6px;
-          font-family:'IBM Plex Mono',monospace;">
+<p style="color:#8b949e;font-size:13px;margin-top:-6px;font-family:'IBM Plex Mono',monospace;">
   {sc['description']}
 </p>
 """, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────
-#  Metric cards
+#  Live price ticker row
 # ─────────────────────────────────────────────
 
-def fmt(v):
-    return f"{unit}{v:,.{dec}f}"
+def fmt(v, d=None):
+    d = d if d is not None else dec
+    return f"{unit}{v:,.{d}f}"
 
-exp_ret     = sim["exp_ret"]
-delta_class = "delta-up" if exp_ret >= 0 else "delta-down"
-sign        = "+" if exp_ret >= 0 else ""
-card_class  = "up" if exp_ret >= 0 else "down"
+chg_class = "price-chg-up" if pct_chg >= 0 else "price-chg-down"
+chg_sign  = "+" if pct_chg >= 0 else ""
+
+# Fetch all three for the ticker strip
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_all_spots():
+    results = {}
+    try:
+        import yfinance as yf
+        for name, m in COMMODITY_META.items():
+            hist = yf.Ticker(m["ticker"]).history(period="2d")
+            if not hist.empty and len(hist) >= 2:
+                c  = float(hist["Close"].iloc[-1])
+                pc = float(hist["Close"].iloc[-2])
+                results[name] = (c, (c/pc-1)*100, m["unit"], m["decimals"])
+            else:
+                results[name] = (m["fallback_spot"], 0.0, m["unit"], m["decimals"])
+    except Exception:
+        for name, m in COMMODITY_META.items():
+            results[name] = (m["fallback_spot"], 0.0, m["unit"], m["decimals"])
+    return results
+
+all_spots = fetch_all_spots()
+price_cards_html = ""
+for cname, (cprice, cchg, cunit, cdec) in all_spots.items():
+    cc = "price-chg-up" if cchg >= 0 else "price-chg-down"
+    cs = "+" if cchg >= 0 else ""
+    price_cards_html += f"""
+    <div class="price-card">
+      <div>
+        <div class="price-name">{cname}</div>
+        <div class="price-val">{cunit}{cprice:,.{cdec}f}</div>
+      </div>
+      <div class="{cc}">{cs}{cchg:.2f}%</div>
+    </div>"""
+
+st.markdown(f'<div class="price-row">{price_cards_html}</div>', unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────
+#  Simulation metric cards
+# ─────────────────────────────────────────────
+
+exp_ret    = sim["exp_ret"]
+dcls       = "delta-up"   if exp_ret >= 0 else "delta-down"
+sign       = "+"           if exp_ret >= 0 else ""
+card_class = "up"          if exp_ret >= 0 else "down"
 
 st.markdown(f"""
 <div class="metric-row">
   <div class="metric-card info">
-    <div class="metric-label">SPOT PRICE</div>
+    <div class="metric-label">LIVE SPOT</div>
     <div class="metric-val">{fmt(spot_val)}</div>
-    <div class="metric-delta delta-neu">{commodity_name}</div>
+    <div class="metric-delta {chg_class}">{chg_sign}{pct_chg:.2f}% today</div>
   </div>
   <div class="metric-card {card_class}">
     <div class="metric-label">MEDIAN · DAY {sim['T']}</div>
     <div class="metric-val">{fmt(sim['median'])}</div>
-    <div class="metric-delta {delta_class}">{sign}{exp_ret:.1f}% vs spot</div>
+    <div class="metric-delta {dcls}">{sign}{exp_ret:.1f}% vs spot</div>
   </div>
   <div class="metric-card up">
     <div class="metric-label">95TH PCT</div>
     <div class="metric-val">{fmt(sim['p95'])}</div>
-    <div class="metric-delta delta-up">+{(sim['p95']/spot_val - 1)*100:.1f}%</div>
+    <div class="metric-delta delta-up">+{(sim['p95']/spot_val-1)*100:.1f}%</div>
   </div>
   <div class="metric-card down">
     <div class="metric-label">5TH PCT</div>
     <div class="metric-val">{fmt(sim['p5'])}</div>
-    <div class="metric-delta delta-down">{(sim['p5']/spot_val - 1)*100:.1f}%</div>
+    <div class="metric-delta delta-down">{(sim['p5']/spot_val-1)*100:.1f}%</div>
   </div>
   <div class="metric-card warn">
     <div class="metric-label">VAR 95%</div>
-    <div class="metric-val">{fmt(abs(spot_val - sim['var95']))}</div>
+    <div class="metric-val">{fmt(abs(spot_val-sim['var95']))}</div>
     <div class="metric-delta delta-down">Potential loss</div>
   </div>
   <div class="metric-card info">
@@ -486,16 +608,20 @@ st.markdown(f"""
 # ─────────────────────────────────────────────
 
 tab1, tab2, tab3, tab4 = st.tabs([
-    "📈  Price Paths",
+    "📈  History + Paths",
     "📊  Return Distribution",
     "🔀  Scenario Comparison",
     "📋  Statistics",
 ])
 
 with tab1:
-    fig1 = plot_paths(paths, spot_val, commodity_name, unit, dec, horizon_days)
+    fig1 = plot_history_and_paths(hist_closes, paths, spot_val,
+                                  commodity_name, unit, dec, horizon_days)
     st.pyplot(fig1, use_container_width=True)
     plt.close(fig1)
+    if data_source == "live":
+        st.caption(f"Left panel: 1-year real market data from Yahoo Finance ({meta['ticker']}). "
+                   f"Right panel: {n_paths:,}-path Monte Carlo forecast.")
 
 with tab2:
     fig2 = plot_distribution(paths, spot_val, commodity_name, unit, dec, horizon_days)
@@ -504,9 +630,8 @@ with tab2:
 
 with tab3:
     fig3 = plot_scenario_compare(
-        commodity_name, spot_val,
-        com["default_drift"], com["default_sigma"],
-        strait_impact, n_paths, horizon_days, seed, com["symbol"],
+        commodity_name, spot_val, live_drift, live_sigma,
+        strait_impact, n_paths, horizon_days, seed, meta["symbol"],
     )
     st.pyplot(fig3, use_container_width=True)
     plt.close(fig3)
@@ -515,63 +640,57 @@ with tab4:
     st.markdown('<p class="section-hdr">Simulation Statistics</p>', unsafe_allow_html=True)
 
     def tbl_color(v, threshold=50, good="up"):
-        if v > threshold:
-            return "tbl-up" if good == "up" else "tbl-down"
-        if v < 20:
-            return "tbl-down" if good == "up" else "tbl-up"
+        if v > threshold: return "tbl-up" if good == "up" else "tbl-down"
+        if v < 20:        return "tbl-down" if good == "up" else "tbl-up"
         return "tbl-neu"
 
     stat_rows = [
-        ("Paths simulated",         f"{sim['N']:,}",                            "tbl-neu"),
-        ("Horizon",                 f"{sim['T']} trading days",                 "tbl-neu"),
-        ("Spot price today",        fmt(sim['spot']),                            "tbl-neu"),
-        ("Mean final price",        fmt(sim['mean']),                            "tbl-up"  if sim['mean']   > spot_val else "tbl-down"),
-        ("Median final price",      fmt(sim['median']),                          "tbl-up"  if sim['median'] > spot_val else "tbl-down"),
-        ("Std deviation",           fmt(sim['std']),                             "tbl-neu"),
-        ("5th percentile",          fmt(sim['p5']),                              "tbl-down"),
-        ("25th percentile",         fmt(sim['p25']),                             "tbl-neu"),
-        ("75th percentile",         fmt(sim['p75']),                             "tbl-neu"),
-        ("95th percentile",         fmt(sim['p95']),                             "tbl-up"),
-        ("VaR 95% (loss)",          fmt(abs(spot_val - sim['var95'])),           "tbl-down"),
-        ("CVaR 95%",                fmt(sim['cvar95']),                          "tbl-down"),
-        ("Expected return",         f"{sim['exp_ret']:+.2f}%",                  "tbl-up"  if sim['exp_ret'] >= 0 else "tbl-down"),
-        ("Probability price rises", f"{sim['prob_up']:.1f}%",                   tbl_color(sim['prob_up'])),
-        ("Probability +10% spike",  f"{sim['prob_up10']:.1f}%",                 "tbl-neu"),
-        ("Probability -10% drop",   f"{sim['prob_dn10']:.1f}%",                 tbl_color(sim['prob_dn10'], good="down")),
+        ("Paths simulated",         f"{sim['N']:,}",                             "tbl-neu"),
+        ("Horizon",                 f"{sim['T']} trading days",                  "tbl-neu"),
+        ("Live spot price",         fmt(sim['spot']),                             "tbl-neu"),
+        ("Today's change",          f"{chg_sign}{pct_chg:.2f}%",                "tbl-up" if pct_chg>=0 else "tbl-down"),
+        ("Mean final price",        fmt(sim['mean']),                             "tbl-up" if sim['mean']>spot_val else "tbl-down"),
+        ("Median final price",      fmt(sim['median']),                           "tbl-up" if sim['median']>spot_val else "tbl-down"),
+        ("Std deviation",           fmt(sim['std']),                              "tbl-neu"),
+        ("5th percentile",          fmt(sim['p5']),                               "tbl-down"),
+        ("25th percentile",         fmt(sim['p25']),                              "tbl-neu"),
+        ("75th percentile",         fmt(sim['p75']),                              "tbl-neu"),
+        ("95th percentile",         fmt(sim['p95']),                              "tbl-up"),
+        ("VaR 95% (loss)",          fmt(abs(spot_val-sim['var95'])),              "tbl-down"),
+        ("CVaR 95%",                fmt(sim['cvar95']),                           "tbl-down"),
+        ("Expected return",         f"{sim['exp_ret']:+.2f}%",                   "tbl-up" if sim['exp_ret']>=0 else "tbl-down"),
+        ("Probability price rises", f"{sim['prob_up']:.1f}%",                    tbl_color(sim['prob_up'])),
+        ("Probability +10% spike",  f"{sim['prob_up10']:.1f}%",                  "tbl-neu"),
+        ("Probability -10% drop",   f"{sim['prob_dn10']:.1f}%",                  tbl_color(sim['prob_dn10'], good="down")),
     ]
-
-    rows_html = "".join(
-        f'<tr><td>{lbl}</td><td class="{cls}">{val}</td></tr>'
-        for lbl, val, cls in stat_rows
-    )
+    rows_html = "".join(f'<tr><td>{l}</td><td class="{c}">{v}</td></tr>' for l,v,c in stat_rows)
     st.markdown(f"""
     <table class="stats-tbl">
       <thead><tr><th>METRIC</th><th>VALUE</th></tr></thead>
       <tbody>{rows_html}</tbody>
-    </table>
-    """, unsafe_allow_html=True)
+    </table>""", unsafe_allow_html=True)
 
-    st.markdown('<p class="section-hdr">Active Model Parameters</p>', unsafe_allow_html=True)
-
+    st.markdown('<p class="section-hdr">Calibrated Model Parameters</p>', unsafe_allow_html=True)
     param_rows = [
-        ("Annual drift (mu)",        f"{drift*100:+.1f}%"),
-        ("Annual volatility (sigma)", f"{sigma*100:.1f}%"),
+        ("Data source",              "Yahoo Finance (yfinance)" if data_source=="live" else "Fallback (offline)"),
+        ("Ticker",                   meta["ticker"]),
+        ("Last updated",             last_updated),
+        ("Live annual drift (mu)",   f"{live_drift*100:+.1f}%"),
+        ("Live annual vol (sigma)",  f"{live_sigma*100:.1f}%"),
+        ("Applied drift",            f"{drift*100:+.1f}%  (live + scenario + override)"),
+        ("Applied sigma",            f"{sigma*100:.1f}%"),
         ("Mean reversion (kappa)",   f"{mean_rev:.3f}"),
-        ("Escalation prob. (daily)", f"{esc_prob*100:.2f}%"),
+        ("Escalation prob.",         f"{esc_prob*100:.2f}% / day"),
         ("Shock magnitude",          f"{shock_mag*100:.1f}%"),
-        ("Strait closure prob.",     f"{strait_prob*100:.2f}%"),
+        ("Strait closure prob.",     f"{strait_prob*100:.2f}% / day"),
         ("Strait price impact",      f"{strait_impact*100:.0f}%"),
     ]
-    params_html = "".join(
-        f'<tr><td>{lbl}</td><td class="tbl-neu">{val}</td></tr>'
-        for lbl, val in param_rows
-    )
+    params_html = "".join(f'<tr><td>{l}</td><td class="tbl-neu">{v}</td></tr>' for l,v in param_rows)
     st.markdown(f"""
     <table class="stats-tbl">
       <thead><tr><th>PARAMETER</th><th>VALUE</th></tr></thead>
       <tbody>{params_html}</tbody>
-    </table>
-    """, unsafe_allow_html=True)
+    </table>""", unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────
@@ -579,9 +698,9 @@ with tab4:
 # ─────────────────────────────────────────────
 
 st.markdown("""
-<div style="margin-top:2rem; padding-top:1rem; border-top:1px solid #21262d;
-            text-align:center; font-family:'IBM Plex Mono',monospace;
-            font-size:11px; color:#484f58; letter-spacing:0.5px;">
-  GBM + POISSON JUMP PROCESS · STRAIT OF HORMUZ CLOSURE OVERLAY · FOR EDUCATIONAL PURPOSES ONLY
+<div style="margin-top:2rem;padding-top:1rem;border-top:1px solid #21262d;
+            text-align:center;font-family:'IBM Plex Mono',monospace;
+            font-size:11px;color:#484f58;letter-spacing:0.5px;">
+  LIVE DATA · YAHOO FINANCE · GBM + POISSON JUMP PROCESS · FOR EDUCATIONAL PURPOSES ONLY
 </div>
 """, unsafe_allow_html=True)
