@@ -124,34 +124,61 @@ COMMODITY_META = {
     },
 }
 
+# Each scenario defines ABSOLUTE drift & sigma per commodity (not adjustments).
+# This guarantees the ordering:
+#   Strait Closure > Mild Escalation > Base Case > De-escalation
+#
+# OIL / GAS share one set; GOLD has its own (safe-haven, lower vol).
+
 SCENARIOS = {
     "Base Case": {
-        "esc_prob":0.03,"shock_mag":0.08,"strait_prob":0.02,"mean_rev":0.05,
-        "drift_adj":0.00,"sigma_adj":0.00,
-        "badge_class":"sc-base","emoji":"🔵",
-        "description":"Low-level tension, current market dynamics prevail.",
+        # --- core GBM params (absolute, per commodity key) ---
+        "drift": {"OIL": 0.03, "GAS": 0.03, "GOLD": 0.03},
+        "sigma": {"OIL": 0.23, "GAS": 0.30, "GOLD": 0.23},
+        # --- jump process ---
+        "jump_prob": 0.01,   # daily probability of a geopolitical jump
+        "jump_mean": 0.02,   # mean fractional jump size
+        # --- strait closure ---
+        "strait_prob": 0.005,
+        "mean_rev":    0.05,
+        # --- UI ---
+        "badge_class": "sc-base", "emoji": "🔵",
+        "description": "Low-level tension, current market dynamics prevail.",
     },
     "Mild Escalation": {
-        "esc_prob":0.08,"shock_mag":0.15,"strait_prob":0.05,"mean_rev":0.04,
-        "drift_adj":0.03,"sigma_adj":0.10,
-        "badge_class":"sc-mild","emoji":"🟡",
-        "description":"Increased airstrikes, regional risk premium builds.",
+        "drift": {"OIL": 0.06, "GAS": 0.06, "GOLD": 0.06},
+        "sigma": {"OIL": 0.30, "GAS": 0.40, "GOLD": 0.30},
+        "jump_prob": 0.03,
+        "jump_mean": 0.05,
+        "strait_prob": 0.02,
+        "mean_rev":    0.04,
+        "badge_class": "sc-mild", "emoji": "🟡",
+        "description": "Increased airstrikes, regional risk premium builds.",
     },
     "Strait Closure": {
-        "esc_prob":0.15,"shock_mag":0.28,"strait_prob":0.15,"mean_rev":0.02,
-        "drift_adj":0.10,"sigma_adj":0.25,
-        "badge_class":"sc-strait","emoji":"🔴",
-        "description":"Hormuz blocked — severe supply disruption scenario.",
+        "drift": {"OIL": 0.12, "GAS": 0.12, "GOLD": 0.12},
+        "sigma": {"OIL": 0.45, "GAS": 0.60, "GOLD": 0.45},
+        "jump_prob": 0.06,
+        "jump_mean": 0.12,
+        "strait_prob": 0.15,
+        "mean_rev":    0.02,
+        "badge_class": "sc-strait", "emoji": "🔴",
+        "description": "Hormuz blocked — severe supply disruption scenario.",
     },
     "De-escalation": {
-        "esc_prob":0.01,"shock_mag":0.04,"strait_prob":0.005,"mean_rev":0.12,
-        "drift_adj":-0.05,"sigma_adj":-0.08,
-        "badge_class":"sc-deesc","emoji":"🟢",
-        "description":"Ceasefire / diplomacy — risk premium deflates.",
+        "drift": {"OIL": -0.02, "GAS": -0.02, "GOLD": -0.02},
+        "sigma": {"OIL": 0.18,  "GAS": 0.22,  "GOLD": 0.18},
+        "jump_prob": 0.00,
+        "jump_mean": -0.01,
+        "strait_prob": 0.001,
+        "mean_rev":    0.12,
+        "badge_class": "sc-deesc", "emoji": "🟢",
+        "description": "Ceasefire / diplomacy — risk premium deflates.",
     },
 }
 
-STRAIT_IMPACT = {"OIL": 0.20, "GAS": 0.25, "GOLD": 0.08}
+# One-time strait closure price impact per commodity
+STRAIT_IMPACT = {"OIL": 0.25, "GAS": 0.35, "GOLD": 0.08}
 
 # Chart colours
 BG   = "#0d1117"
@@ -208,9 +235,15 @@ def fetch_live_data(ticker: str, fallback_spot: float,
 # ─────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
-def run_mc(spot, drift, sigma, esc_prob, shock_mag,
+def run_mc(spot, drift, sigma, jump_prob, jump_mean,
            strait_prob, mean_rev, strait_impact,
            n_paths, horizon, seed, symbol):
+    """
+    GBM + mean-reversion + Poisson jump process + strait closure shock.
+
+    jump_prob : daily probability of a geopolitical jump event
+    jump_mean : mean fractional price change on a jump (can be negative)
+    """
     rng = np.random.default_rng(seed)
     dt  = 1.0 / 252.0
     S0  = spot
@@ -222,13 +255,24 @@ def run_mc(spot, drift, sigma, esc_prob, shock_mag,
 
     for t in range(horizon):
         Z   = rng.standard_normal(n_paths)
+
+        # ── GBM step ──────────────────────────────────────────
         dS  = S * ((drift - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * Z)
+
+        # ── Mean reversion toward S0 ──────────────────────────
         dS += -mean_rev * (S - S0) * dt
 
-        esc_mask = rng.random(n_paths) < esc_prob * dt
-        dS      += S * shock_mag * (0.5 + rng.random(n_paths)) * esc_mask
+        # ── Poisson jumps (geopolitical shocks) ───────────────
+        # jump_prob is a daily probability; scale to dt
+        if jump_prob > 0:
+            jump_mask = rng.random(n_paths) < jump_prob * dt * 252
+            # jump size ~ N(jump_mean, jump_mean/2) clipped to avoid absurdity
+            jump_sizes = rng.normal(jump_mean, abs(jump_mean) * 0.5 + 0.01, n_paths)
+            jump_sizes = np.clip(jump_sizes, -0.40, 0.60)
+            dS += S * jump_sizes * jump_mask
 
-        new_close      = (~strait_closed) & (rng.random(n_paths) < strait_prob * dt)
+        # ── One-time Strait of Hormuz closure ─────────────────
+        new_close      = (~strait_closed) & (rng.random(n_paths) < strait_prob * dt * 252)
         strait_closed |= new_close
         dS            += S * (strait_impact + rng.random(n_paths) * 0.05) * new_close
 
@@ -366,8 +410,8 @@ def plot_distribution(paths, spot, name, unit, dec, horizon):
     return fig
 
 
-def plot_scenario_compare(com_name, spot, base_drift, base_sigma,
-                          strait_impact, n_paths, horizon, seed, symbol):
+def plot_scenario_compare(com_name, spot, symbol,
+                          strait_impact, n_paths, horizon, seed):
     mpl_dark()
     sc_colors = {
         "Base Case": BLUE, "Mild Escalation": AMB,
@@ -375,10 +419,10 @@ def plot_scenario_compare(com_name, spot, base_drift, base_sigma,
     }
     fig, ax = plt.subplots(figsize=(9, 4), facecolor=BG)
     for sc_name, sc in SCENARIOS.items():
-        d = base_drift + sc["drift_adj"]
-        s = max(0.05, base_sigma + sc["sigma_adj"])
+        d = sc["drift"][symbol]
+        s = sc["sigma"][symbol]
         p = run_mc(spot, d, s,
-                   sc["esc_prob"], sc["shock_mag"],
+                   sc["jump_prob"], sc["jump_mean"],
                    sc["strait_prob"], sc["mean_rev"],
                    strait_impact, min(n_paths, 500), horizon, seed, symbol)
         ax.plot(np.arange(p.shape[1]), np.median(p, axis=0),
@@ -426,17 +470,19 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### Override Market Params")
-    st.caption("Auto-filled from live data. Adjust if needed.")
+    st.caption("Auto-filled from scenario + live vol. Adjust if needed.")
 
-    override_drift = st.slider("Annual drift (%)",      -30, 50, int(sc["drift_adj"] * 100)) / 100.0
-    override_sigma = st.slider("Annual volatility (%)",   5, 100, int(max(0.05, meta["fallback_sigma"] + sc["sigma_adj"]) * 100)) / 100.0
+    _sc_drift = sc["drift"][meta["symbol"]]
+    _sc_sigma = sc["sigma"][meta["symbol"]]
+    override_drift = st.slider("Annual drift (%)",      -30, 50,  int(_sc_drift * 100)) / 100.0
+    override_sigma = st.slider("Annual volatility (%)",   5, 120, int(_sc_sigma * 100)) / 100.0
 
     st.markdown("---")
     st.markdown("### Geopolitical Shocks")
-    esc_prob    = st.slider("Escalation prob. (daily %)", 0.0, 30.0, sc["esc_prob"]   * 100, step=0.5) / 100
-    shock_mag   = st.slider("Shock magnitude (%)",        0.0, 50.0, sc["shock_mag"]  * 100, step=0.5) / 100
-    strait_prob = st.slider("Strait closure prob. (%)",   0.0, 20.0, sc["strait_prob"]* 100, step=0.5) / 100
-    mean_rev    = st.slider("Mean reversion (k)",         0.0,  0.3, sc["mean_rev"],          step=0.01)
+    jump_prob   = st.slider("Jump prob. (daily %)",     0.0, 10.0, sc["jump_prob"] * 100, step=0.1) / 100
+    jump_mean   = st.slider("Jump mean size (%)",      -5.0, 20.0, sc["jump_mean"] * 100, step=0.5) / 100
+    strait_prob = st.slider("Strait closure prob. (%)", 0.0, 20.0, sc["strait_prob"]* 100, step=0.5) / 100
+    mean_rev    = st.slider("Mean reversion (k)",        0.0,  0.3, sc["mean_rev"],         step=0.01)
 
     strait_impact = STRAIT_IMPACT[meta["symbol"]]
 
@@ -454,9 +500,10 @@ with st.spinner("Fetching live prices…"):
             meta["fallback_sigma"],
         )
 
-# Blend: live calibrated params + scenario adjustments + sidebar override
-drift = live_drift + sc["drift_adj"] + override_drift
-sigma = max(0.05, live_sigma + sc["sigma_adj"] + (override_sigma - meta["fallback_sigma"]))
+# Blend: scenario absolute params + override from sidebar
+# (live drift used only if override wasn't touched, but sidebar always wins)
+drift = override_drift
+sigma = max(0.05, override_sigma)
 
 unit = meta["unit"]
 dec  = meta["decimals"]
@@ -468,7 +515,7 @@ dec  = meta["decimals"]
 
 paths = run_mc(
     spot=spot, drift=drift, sigma=sigma,
-    esc_prob=esc_prob, shock_mag=shock_mag,
+    jump_prob=jump_prob, jump_mean=jump_mean,
     strait_prob=strait_prob, mean_rev=mean_rev,
     strait_impact=strait_impact,
     n_paths=n_paths, horizon=horizon_days,
@@ -630,8 +677,8 @@ with tab2:
 
 with tab3:
     fig3 = plot_scenario_compare(
-        commodity_name, spot_val, live_drift, live_sigma,
-        strait_impact, n_paths, horizon_days, seed, meta["symbol"],
+        commodity_name, spot_val, meta["symbol"],
+        strait_impact, n_paths, horizon_days, seed,
     )
     st.pyplot(fig3, use_container_width=True)
     plt.close(fig3)
@@ -677,11 +724,11 @@ with tab4:
         ("Last updated",             last_updated),
         ("Live annual drift (mu)",   f"{live_drift*100:+.1f}%"),
         ("Live annual vol (sigma)",  f"{live_sigma*100:.1f}%"),
-        ("Applied drift",            f"{drift*100:+.1f}%  (live + scenario + override)"),
+        ("Applied drift",            f"{drift*100:+.1f}%  (scenario override)"),
         ("Applied sigma",            f"{sigma*100:.1f}%"),
         ("Mean reversion (kappa)",   f"{mean_rev:.3f}"),
-        ("Escalation prob.",         f"{esc_prob*100:.2f}% / day"),
-        ("Shock magnitude",          f"{shock_mag*100:.1f}%"),
+        ("Jump prob. (daily)",       f"{jump_prob*100:.2f}%"),
+        ("Jump mean size",           f"{jump_mean*100:+.1f}%"),
         ("Strait closure prob.",     f"{strait_prob*100:.2f}% / day"),
         ("Strait price impact",      f"{strait_impact*100:.0f}%"),
     ]
