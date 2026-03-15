@@ -60,16 +60,6 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 .metric-val   { font-size:1.4rem; font-weight:600; color:#e6edf3; font-family:'IBM Plex Mono',monospace; }
 .metric-delta { font-size:11px; margin-top:2px; font-family:'IBM Plex Mono',monospace; }
 .delta-up  { color:#1d9e75; } .delta-down { color:#e24b4a; } .delta-neu { color:#8b949e; }
-.price-row { display:flex; gap:10px; margin-bottom:1.2rem; flex-wrap:wrap; }
-.price-card {
-    flex:1; min-width:160px; background:#161b22; border:1px solid #30363d;
-    border-radius:8px; padding:12px 16px;
-    display:flex; justify-content:space-between; align-items:center;
-}
-.price-name { font-size:12px; color:#8b949e; font-family:'IBM Plex Mono',monospace; }
-.price-val  { font-size:1.2rem; font-weight:600; color:#e6edf3; font-family:'IBM Plex Mono',monospace; }
-.price-chg-up   { font-size:11px; color:#1d9e75; font-family:'IBM Plex Mono',monospace; }
-.price-chg-down { font-size:11px; color:#e24b4a; font-family:'IBM Plex Mono',monospace; }
 .scenario-badge {
     display:inline-block; padding:4px 12px; border-radius:99px;
     font-size:12px; font-family:'IBM Plex Mono',monospace;
@@ -559,7 +549,7 @@ st.markdown(f"""
 
 
 # ─────────────────────────────────────────────
-#  Live price ticker row
+#  Helpers + Simulation metric cards
 # ─────────────────────────────────────────────
 
 def fmt(v, d=None):
@@ -568,46 +558,6 @@ def fmt(v, d=None):
 
 chg_class = "price-chg-up" if pct_chg >= 0 else "price-chg-down"
 chg_sign  = "+" if pct_chg >= 0 else ""
-
-# Fetch all three for the ticker strip
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_all_spots():
-    results = {}
-    try:
-        import yfinance as yf
-        for name, m in COMMODITY_META.items():
-            hist = yf.Ticker(m["ticker"]).history(period="2d")
-            if not hist.empty and len(hist) >= 2:
-                c  = float(hist["Close"].iloc[-1])
-                pc = float(hist["Close"].iloc[-2])
-                results[name] = (c, (c/pc-1)*100, m["unit"], m["decimals"])
-            else:
-                results[name] = (m["fallback_spot"], 0.0, m["unit"], m["decimals"])
-    except Exception:
-        for name, m in COMMODITY_META.items():
-            results[name] = (m["fallback_spot"], 0.0, m["unit"], m["decimals"])
-    return results
-
-all_spots = fetch_all_spots()
-price_cards_html = ""
-for cname, (cprice, cchg, cunit, cdec) in all_spots.items():
-    cc = "price-chg-up" if cchg >= 0 else "price-chg-down"
-    cs = "+" if cchg >= 0 else ""
-    price_cards_html += f"""
-    <div class="price-card">
-      <div>
-        <div class="price-name">{cname}</div>
-        <div class="price-val">{cunit}{cprice:,.{cdec}f}</div>
-      </div>
-      <div class="{cc}">{cs}{cchg:.2f}%</div>
-    </div>"""
-
-st.markdown(f'<div class="price-row">{price_cards_html}</div>', unsafe_allow_html=True)
-
-
-# ─────────────────────────────────────────────
-#  Simulation metric cards
-# ─────────────────────────────────────────────
 
 exp_ret    = sim["exp_ret"]
 dcls       = "delta-up"   if exp_ret >= 0 else "delta-down"
