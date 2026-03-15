@@ -1,0 +1,1139 @@
+"""
+╔══════════════════════════════════════════════════════════════════════════╗
+║        Commodity Monte Carlo Simulation — Iran-Israel Conflict Risk      ║
+║        Full Live-Data Edition                                            ║
+╠══════════════════════════════════════════════════════════════════════════╣
+║  DATA SOURCES  (all FREE — no API key required)                          ║
+║  ─────────────────────────────────────────────────────────────────────  ║
+║  Yahoo Finance (via yfinance)                                            ║
+║    CL=F   — WTI Crude Oil front-month futures                           ║
+║    NG=F   — Henry Hub Natural Gas front-month futures                   ║
+║    GC=F   — Gold front-month futures                                    ║
+║    OVX    — CBOE Crude Oil Volatility Index (implied vol)               ║
+║    ^VIX   — CBOE Volatility Index (fear / risk gauge)                   ║
+║    DX-Y.NYB — US Dollar Index                                           ║
+║                                                                          ║
+║  FRED — St. Louis Federal Reserve (via pandas-datareader)               ║
+║    DCOILWTICO       — WTI crude oil spot (daily, $/bbl)                 ║
+║    DCOILBRENTEU     — Brent crude oil spot (daily, $/bbl)               ║
+║    GOLDPMGBD228NLBM — Gold London PM fix (daily, $/troy oz)             ║
+║                                                                          ║
+║  MODEL                                                                   ║
+║  ─────────────────────────────────────────────────────────────────────  ║
+║  Geometric Brownian Motion  +  mean reversion  +  Poisson jump shocks   ║
+║  Parameters calibrated from live historical data.                        ║
+║                                                                          ║
+║  INSTALL                                                                 ║
+║  ─────────────────────────────────────────────────────────────────────  ║
+║  pip install yfinance pandas-datareader numpy pandas matplotlib scipy   ║
+╚══════════════════════════════════════════════════════════════════════════╝
+"""
+
+# ─── Standard library ─────────────────────────────────────────────────────────
+import warnings
+warnings.filterwarnings("ignore")
+import sys
+import os
+from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from typing import Optional, Dict, List, Tuple
+
+# ─── Third-party ──────────────────────────────────────────────────────────────
+import numpy as np
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import matplotlib.ticker as mticker
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+
+try:
+    import yfinance as yf
+except ImportError:
+    sys.exit(
+        "\n❌  yfinance is not installed.\n"
+        "    Fix:  pip install yfinance\n"
+    )
+
+try:
+    import pandas_datareader.data as web
+    FRED_AVAILABLE = True
+except ImportError:
+    FRED_AVAILABLE = False
+    print(
+        "\n⚠   pandas-datareader not found — FRED series will be skipped.\n"
+        "    Fix:  pip install pandas-datareader\n"
+    )
+
+try:
+    from scipy import stats as scipy_stats
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 1 — CONSTANTS & TICKERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Yahoo Finance tickers
+YAHOO_TICKERS: Dict[str, str] = {
+    "OIL":  "CL=F",       # WTI Crude Oil futures
+    "GAS":  "NG=F",       # Henry Hub Natural Gas futures
+    "GOLD": "GC=F",       # Gold futures
+    "OVX":  "OVX",        # Oil Volatility Index
+    "VIX":  "^VIX",       # Equity Volatility Index
+    "DXY":  "DX-Y.NYB",   # US Dollar Index
+    "XLE":  "XLE",        # Energy Sector ETF (extra context)
+    "GLD":  "GLD",        # Gold ETF (extra context)
+}
+
+# FRED series IDs
+FRED_TICKERS: Dict[str, str] = {
+    "wti_spot":    "DCOILWTICO",          # WTI spot $/bbl (daily)
+    "brent_spot":  "DCOILBRENTEU",        # Brent spot $/bbl (daily)
+    "gold_fix":    "GOLDPMGBD228NLBM",    # Gold London fix $/troy oz (daily)
+    "natgas_spot": "MHHNGSP",             # Henry Hub spot $/MMBtu (monthly)
+    "cpi":         "CPIAUCSL",            # CPI — inflation context
+    "fedfunds":    "FEDFUNDS",            # Fed Funds Rate — macro context
+}
+
+HISTORY_YEARS   = 5     # years of price history to download
+TRADING_DAYS    = 252   # assumed trading days per year
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 2 — DATA FETCHING
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class MarketData:
+    """All downloaded and derived market data in one place."""
+    # raw OHLCV DataFrames keyed by our internal symbol
+    ohlcv:   Dict[str, pd.DataFrame] = field(default_factory=dict)
+    # adjusted close price series
+    close:   Dict[str, pd.Series]    = field(default_factory=dict)
+    # daily log-return series
+    returns: Dict[str, pd.Series]    = field(default_factory=dict)
+    # FRED series
+    fred:    Dict[str, pd.Series]    = field(default_factory=dict)
+    # scalar summaries
+    spot:    Dict[str, float]        = field(default_factory=dict)
+    ann_vol: Dict[str, float]        = field(default_factory=dict)   # realised annualised σ
+    ann_drift: Dict[str, float]      = field(default_factory=dict)   # annualised μ
+    # implied vols from index levels (OVX, VIX are already % per year)
+    ovx_level: float = 30.0   # OVX closing level (%)
+    vix_level: float = 20.0   # VIX closing level (%)
+
+
+def _start_date(years: int) -> str:
+    return (datetime.today() - timedelta(days=years * 365)).strftime("%Y-%m-%d")
+
+
+def fetch_yahoo_ticker(symbol: str, internal_key: str, years: int = HISTORY_YEARS) -> pd.DataFrame:
+    """
+    Download OHLCV data from Yahoo Finance for a single ticker.
+    Returns empty DataFrame on failure.
+    """
+    start = _start_date(years)
+    try:
+        df = yf.download(
+            symbol,
+            start=start,
+            progress=False,
+            auto_adjust=True,
+            threads=False,
+        )
+        if df.empty:
+            raise ValueError("Empty response")
+        # yfinance >= 0.2 returns MultiIndex columns when downloading single ticker
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df.index = pd.to_datetime(df.index)
+        df.index.name = "Date"
+        return df
+    except Exception as exc:
+        print(f"    ✗  Yahoo [{symbol}] — {exc}")
+        return pd.DataFrame()
+
+
+def fetch_fred_series(series_id: str, years: int = HISTORY_YEARS * 2) -> pd.Series:
+    """
+    Download a public FRED series via pandas-datareader.
+    Returns empty Series on failure.
+    """
+    if not FRED_AVAILABLE:
+        return pd.Series(dtype=float, name=series_id)
+    start = _start_date(years)
+    try:
+        df = web.get_data_fred(series_id, start=start)
+        s = df.iloc[:, 0].dropna()
+        s.index = pd.to_datetime(s.index)
+        s.name = series_id
+        return s
+    except Exception as exc:
+        print(f"    ✗  FRED [{series_id}] — {exc}")
+        return pd.Series(dtype=float, name=series_id)
+
+
+def compute_return_stats(close: pd.Series) -> Tuple[float, float]:
+    """Return (annualised_drift, annualised_vol) from a close price series."""
+    lr = np.log(close / close.shift(1)).dropna()
+    ann_vol   = float(lr.std()  * np.sqrt(TRADING_DAYS))
+    ann_drift = float(lr.mean() * TRADING_DAYS)
+    return ann_drift, ann_vol
+
+
+def load_all_data() -> MarketData:
+    """
+    Master data loader.
+    Downloads Yahoo Finance OHLCV for all tickers, then FRED macro series.
+    Computes log-returns and annualised statistics for each.
+    """
+    md = MarketData()
+    sep = "═" * 64
+
+    print(f"\n{sep}")
+    print("  📡  Downloading live market data")
+    print(f"{sep}")
+
+    # ── 2a. Yahoo Finance ─────────────────────────────────────────────────────
+    print("\n  Yahoo Finance")
+    print("  " + "─" * 60)
+    for key, ticker in YAHOO_TICKERS.items():
+        print(f"  {ticker:<14} ({key:<5})", end="  ")
+        df = fetch_yahoo_ticker(ticker, key)
+        if df.empty:
+            print("skipped")
+            continue
+
+        md.ohlcv[key] = df
+        col = "Close" if "Close" in df.columns else df.columns[0]
+        close = df[col].dropna()
+        md.close[key]   = close
+        md.spot[key]    = float(close.iloc[-1])
+        lr = np.log(close / close.shift(1)).dropna()
+        md.returns[key] = lr
+        drift, vol = compute_return_stats(close)
+        md.ann_drift[key] = drift
+        md.ann_vol[key]   = vol
+
+        # special: OVX and VIX are index levels (already %-implied vol)
+        if key == "OVX":
+            md.ovx_level = float(close.iloc[-1])
+        if key == "VIX":
+            md.vix_level = float(close.iloc[-1])
+
+        print(
+            f"✓  latest={md.spot[key]:>10.3f}  "
+            f"ann_vol={vol*100:5.1f}%  "
+            f"ann_drift={drift*100:+6.1f}%  "
+            f"obs={len(close)}"
+        )
+
+    # ── 2b. FRED ─────────────────────────────────────────────────────────────
+    if FRED_AVAILABLE:
+        print("\n  FRED (St. Louis Fed)")
+        print("  " + "─" * 60)
+        for name, sid in FRED_TICKERS.items():
+            print(f"  {sid:<28} ({name})", end="  ")
+            s = fetch_fred_series(sid)
+            if s.empty:
+                print("skipped")
+                continue
+            md.fred[name] = s
+            print(
+                f"✓  obs={len(s):<5}  "
+                f"from {s.index[0].date()}  "
+                f"to {s.index[-1].date()}  "
+                f"latest={s.iloc[-1]:.3f}"
+            )
+    else:
+        print("\n  FRED skipped (pandas-datareader not installed)")
+
+    print(f"\n{sep}\n")
+    return md
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 3 — MODEL PARAMETERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class CommodityConfig:
+    """
+    Per-commodity configuration.
+    Fields are populated from live data; fallbacks are used if fetch fails.
+    """
+    name:        str
+    symbol:      str            # internal key: OIL | GAS | GOLD
+    unit:        str            # currency symbol for display
+    decimals:    int            # display decimal places
+    spot:        float          # current / most recent price
+    drift:       float          # annualised drift μ (from live data)
+    sigma:       float          # annualised volatility σ (from live data)
+    implied_vol: float          # implied vol from OVX / proxy
+
+    # Fallback values used when live data is unavailable
+    _fallback_spot:  float = 0.0
+    _fallback_sigma: float = 0.0
+    _fallback_drift: float = 0.0
+
+
+# Hard-coded fallbacks in case Yahoo Finance is unreachable
+_FALLBACKS: Dict[str, dict] = {
+    "OIL":  dict(name="Crude Oil (WTI)", unit="$", decimals=2,
+                 spot=85.0,   sigma=0.28, drift=0.05),
+    "GAS":  dict(name="Natural Gas",     unit="$", decimals=3,
+                 spot=2.80,   sigma=0.55, drift=0.02),
+    "GOLD": dict(name="Gold",            unit="$", decimals=0,
+                 spot=2340.0, sigma=0.15, drift=0.06),
+}
+
+
+def build_commodity_configs(md: MarketData) -> Dict[str, CommodityConfig]:
+    """
+    Build CommodityConfig objects calibrated from live data.
+    Falls back to hard-coded values if data is missing.
+    """
+    configs: Dict[str, CommodityConfig] = {}
+    for sym, fb in _FALLBACKS.items():
+        spot  = md.spot.get(sym,       fb["spot"])
+        sigma = md.ann_vol.get(sym,    fb["sigma"])
+        drift = md.ann_drift.get(sym,  fb["drift"])
+
+        # Use OVX level as implied vol for oil (OVX is in % not decimal)
+        if sym == "OIL":
+            implied = md.ovx_level / 100.0 if md.ovx_level > 0 else sigma * 1.15
+        elif sym == "GAS":
+            implied = sigma * 1.20   # gas options carry a vol premium
+        else:  # GOLD
+            implied = sigma * 1.10
+
+        configs[sym] = CommodityConfig(
+            name=fb["name"],
+            symbol=sym,
+            unit=fb["unit"],
+            decimals=fb["decimals"],
+            spot=spot,
+            drift=drift,
+            sigma=sigma,
+            implied_vol=implied,
+            _fallback_spot=fb["spot"],
+            _fallback_sigma=fb["sigma"],
+            _fallback_drift=fb["drift"],
+        )
+
+    return configs
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 4 — GEOPOLITICAL SCENARIOS
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class GeoScenario:
+    """
+    Geopolitical risk parameters for the Iran-Israel conflict.
+
+    All probabilities are *daily* (i.e. per trading day).
+    Shock magnitude is the *mean* fractional jump per triggered event.
+    Strait impact is the *mean* fractional jump applied to each commodity
+    if the Strait of Hormuz closure event fires.
+    """
+    label: str
+
+    # Escalation shocks — random, can fire on multiple days
+    escalation_prob_daily:  float   # P(shock on any given day)
+    shock_magnitude_mean:   float   # mean fractional price jump  e.g. 0.12 = 12%
+    shock_magnitude_std:    float   # std of shock magnitude (lognormal spread)
+
+    # Strait of Hormuz closure — one-time structural event
+    strait_prob_daily:      float   # daily hazard rate of closure
+    strait_impact_oil:      float   # fractional price jump for WTI if closes
+    strait_impact_gas:      float   # fractional price jump for Nat Gas
+    strait_impact_gold:     float   # fractional price jump for Gold (safe-haven)
+
+    # Mean reversion strength (κ) — higher = faster pull back to spot
+    mean_reversion: float
+
+    # Optional: description for reports
+    description: str = ""
+
+
+SCENARIOS: Dict[str, GeoScenario] = {
+
+    "Base case": GeoScenario(
+        label="Base case",
+        description=(
+            "Low-level conflict, sporadic drone/missile exchanges. "
+            "Strait of Hormuz open. Regional risk premium persists."
+        ),
+        escalation_prob_daily=0.03,
+        shock_magnitude_mean=0.06,
+        shock_magnitude_std=0.03,
+        strait_prob_daily=0.01,
+        strait_impact_oil=0.15,
+        strait_impact_gas=0.18,
+        strait_impact_gold=0.06,
+        mean_reversion=0.06,
+    ),
+
+    "Mild escalation": GeoScenario(
+        label="Mild escalation",
+        description=(
+            "Increased air strikes, proxy group attacks on shipping. "
+            "Strait remains technically open but insured at a high premium."
+        ),
+        escalation_prob_daily=0.07,
+        shock_magnitude_mean=0.12,
+        shock_magnitude_std=0.05,
+        strait_prob_daily=0.04,
+        strait_impact_oil=0.22,
+        strait_impact_gas=0.28,
+        strait_impact_gold=0.09,
+        mean_reversion=0.04,
+    ),
+
+    "Severe escalation": GeoScenario(
+        label="Severe escalation",
+        description=(
+            "Direct military confrontation between Iran and Israel. "
+            "Large-scale missile barrages, Strait disruptions imminent."
+        ),
+        escalation_prob_daily=0.14,
+        shock_magnitude_mean=0.22,
+        shock_magnitude_std=0.08,
+        strait_prob_daily=0.10,
+        strait_impact_oil=0.30,
+        strait_impact_gas=0.38,
+        strait_impact_gold=0.12,
+        mean_reversion=0.02,
+    ),
+
+    "Strait closure": GeoScenario(
+        label="Strait closure",
+        description=(
+            "Iran closes or mines the Strait of Hormuz. ~20%% of global "
+            "oil supply disrupted. Extreme supply shock scenario."
+        ),
+        escalation_prob_daily=0.18,
+        shock_magnitude_mean=0.30,
+        shock_magnitude_std=0.10,
+        strait_prob_daily=0.20,
+        strait_impact_oil=0.40,
+        strait_impact_gas=0.50,
+        strait_impact_gold=0.15,
+        mean_reversion=0.01,
+    ),
+
+    "De-escalation": GeoScenario(
+        label="De-escalation",
+        description=(
+            "Diplomatic progress, ceasefire negotiations underway. "
+            "Risk premium unwinding, demand concerns resurgent."
+        ),
+        escalation_prob_daily=0.01,
+        shock_magnitude_mean=0.03,
+        shock_magnitude_std=0.01,
+        strait_prob_daily=0.002,
+        strait_impact_oil=0.04,
+        strait_impact_gas=0.05,
+        strait_impact_gold=0.02,
+        mean_reversion=0.15,
+    ),
+}
+
+# map internal symbol → scenario attribute name
+_STRAIT_ATTR: Dict[str, str] = {
+    "OIL":  "strait_impact_oil",
+    "GAS":  "strait_impact_gas",
+    "GOLD": "strait_impact_gold",
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 5 — MONTE CARLO ENGINE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_monte_carlo(
+    cc:           CommodityConfig,
+    geo:          GeoScenario,
+    n_paths:      int  = 1000,
+    horizon_days: int  = 90,
+    seed:         Optional[int] = 42,
+) -> np.ndarray:
+    """
+    Simulate commodity price paths using:
+
+        dS = S·[μ dt + σ√dt Z]          ← GBM
+             − κ(S − S₀) dt              ← Ornstein-Uhlenbeck mean reversion
+             + S·J·dN_esc               ← Poisson escalation jumps
+             + S·K·1[strait closes]     ← one-time Strait of Hormuz event
+
+    Parameters
+    ----------
+    cc            : CommodityConfig  (spot, drift, sigma from live data)
+    geo           : GeoScenario      (geopolitical shock parameters)
+    n_paths       : number of Monte Carlo paths
+    horizon_days  : forecast horizon in trading days
+    seed          : random seed for reproducibility (None = random)
+
+    Returns
+    -------
+    paths : np.ndarray  shape (n_paths, horizon_days + 1)
+            paths[:, 0]  = S0 (spot price)
+            paths[:, t]  = simulated price at day t
+    """
+    rng    = np.random.default_rng(seed)
+    S0     = cc.spot
+    mu     = cc.drift
+    sigma  = cc.sigma
+    kappa  = geo.mean_reversion
+    dt     = 1.0 / TRADING_DAYS            # one trading day in years
+
+    strait_impact = getattr(geo, _STRAIT_ATTR[cc.symbol])
+
+    # shape: (n_paths, horizon_days + 1)
+    paths = np.empty((n_paths, horizon_days + 1), dtype=np.float64)
+    paths[:, 0] = S0
+
+    # current price vector  (updated in-place each step)
+    S = np.full(n_paths, S0, dtype=np.float64)
+
+    # track which paths have experienced a strait closure (one-time event)
+    strait_closed = np.zeros(n_paths, dtype=bool)
+
+    for t in range(horizon_days):
+
+        # ── GBM increment ───────────────────────────────────────────────────
+        Z   = rng.standard_normal(n_paths)
+        gbm = (mu - 0.5 * sigma ** 2) * dt + sigma * np.sqrt(dt) * Z
+
+        # ── Mean reversion (pull toward long-run equilibrium S₀) ────────────
+        mr = -kappa * (S - S0) * dt
+
+        # ── Escalation shocks (Poisson, per-day probability) ────────────────
+        esc_mask  = rng.random(n_paths) < geo.escalation_prob_daily
+        # shock magnitude drawn from a half-normal to ensure positivity
+        raw_shock = np.abs(rng.normal(
+            geo.shock_magnitude_mean,
+            geo.shock_magnitude_std,
+            n_paths,
+        ))
+        escalation_jump = raw_shock * esc_mask   # zero if no shock
+
+        # ── Strait of Hormuz closure (one-time structural shock) ────────────
+        new_closure  = (~strait_closed) & (rng.random(n_paths) < geo.strait_prob_daily)
+        strait_closed |= new_closure
+        # extra random spread on strait impact
+        strait_jump = (
+            strait_impact + rng.uniform(0, 0.05, n_paths)
+        ) * new_closure
+
+        # ── Combine all components ───────────────────────────────────────────
+        S = S * np.exp(gbm)          # apply GBM multiplicatively
+        S = S + mr                   # mean reversion additive
+        S = S * (1.0 + escalation_jump)
+        S = S * (1.0 + strait_jump)
+        S = np.maximum(S, 0.01)      # price floor
+
+        paths[:, t + 1] = S
+
+    return paths
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 6 — STATISTICS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def compute_statistics(paths: np.ndarray, spot: float) -> dict:
+    """
+    Compute a comprehensive set of statistics from simulation output.
+
+    Parameters
+    ----------
+    paths : np.ndarray  shape (n_paths, horizon + 1)
+    spot  : float       current spot price (paths[:, 0])
+
+    Returns
+    -------
+    stats : dict
+    """
+    final    = paths[:, -1]
+    T        = paths.shape[1] - 1
+    n_paths  = paths.shape[0]
+
+    # percentiles
+    pcts = np.percentile(final, [1, 5, 10, 25, 50, 75, 90, 95, 99])
+
+    # VaR and CVaR at 95% confidence
+    var_95  = pcts[1]   # 5th percentile of final price
+    tail    = final[final <= var_95]
+    cvar_95 = float(tail.mean()) if len(tail) > 0 else float(var_95)
+
+    # returns (log)
+    log_ret  = np.log(paths[:, 1:] / paths[:, :-1])     # shape (n_paths, T)
+    path_ret = np.log(final / spot)                       # total log-return each path
+    mu_r     = float(log_ret.mean() * TRADING_DAYS)       # annualised mean
+    sig_r    = float(log_ret.std()  * np.sqrt(TRADING_DAYS))  # annualised vol
+    sharpe   = mu_r / sig_r if sig_r > 0 else 0.0
+
+    # max drawdown (averaged across paths)
+    running_max  = np.maximum.accumulate(paths, axis=1)
+    drawdowns    = (paths - running_max) / running_max    # negative values
+    max_dd_paths = drawdowns.min(axis=1)
+    avg_max_dd   = float(max_dd_paths.mean())
+
+    return {
+        "n_paths":     n_paths,
+        "horizon":     T,
+        "spot":        float(spot),
+        "mean":        float(final.mean()),
+        "median":      float(np.median(final)),
+        "std":         float(final.std()),
+        "skewness":    float(scipy_stats.skew(final)) if SCIPY_AVAILABLE else float("nan"),
+        "kurtosis":    float(scipy_stats.kurtosis(final)) if SCIPY_AVAILABLE else float("nan"),
+        "p1":  float(pcts[0]),  "p5":  float(pcts[1]),  "p10": float(pcts[2]),
+        "p25": float(pcts[3]),  "p50": float(pcts[4]),  "p75": float(pcts[5]),
+        "p90": float(pcts[6]),  "p95": float(pcts[7]),  "p99": float(pcts[8]),
+        "var_95":      float(var_95),
+        "cvar_95":     float(cvar_95),
+        "var_loss":    float(abs(spot - var_95)),
+        "sharpe":      float(sharpe),
+        "ann_vol_sim": float(sig_r),
+        "avg_max_dd":  float(avg_max_dd),
+        "exp_ret_pct": float((final.mean() / spot - 1) * 100),
+        "prob_up":     float((final > spot).mean() * 100),
+        "prob_up5":    float((final > spot * 1.05).mean() * 100),
+        "prob_up10":   float((final > spot * 1.10).mean() * 100),
+        "prob_up20":   float((final > spot * 1.20).mean() * 100),
+        "prob_down5":  float((final < spot * 0.95).mean() * 100),
+        "prob_down10": float((final < spot * 0.90).mean() * 100),
+        "prob_down20": float((final < spot * 0.80).mean() * 100),
+    }
+
+
+def print_statistics(st: dict, name: str, unit: str = "$", decimals: int = 2) -> None:
+    """Pretty-print statistics to the terminal."""
+    w   = 62
+    fmt = lambda v: f"{unit}{v:>12,.{decimals}f}"
+    pct = lambda v: f"  {v:>10.1f}%"
+    flt = lambda v: f"  {v:>10.3f}"
+
+    print(f"\n{'═'*w}")
+    print(f"  {name}")
+    print(f"  {st['n_paths']:,} paths  ×  {st['horizon']} trading days")
+    print(f"{'─'*w}")
+    rows = [
+        ("Spot price today",              fmt(st['spot'])),
+        ("", ""),
+        ("── Price at horizon ──",        ""),
+        ("  Mean",                         fmt(st['mean'])),
+        ("  Median (50th pct)",            fmt(st['median'])),
+        ("  Standard deviation",           fmt(st['std'])),
+        ("  Skewness",                     flt(st['skewness'])),
+        ("  Excess kurtosis",              flt(st['kurtosis'])),
+        ("", ""),
+        ("── Percentile fan ──",           ""),
+        ("  1st percentile",               fmt(st['p1'])),
+        ("  5th percentile",               fmt(st['p5'])),
+        ("  25th percentile",              fmt(st['p25'])),
+        ("  75th percentile",              fmt(st['p75'])),
+        ("  95th percentile",              fmt(st['p95'])),
+        ("  99th percentile",              fmt(st['p99'])),
+        ("", ""),
+        ("── Risk metrics ──",             ""),
+        ("  VaR 95% (potential loss)",     fmt(st['var_loss'])),
+        ("  CVaR 95% (expected in tail)",  fmt(st['cvar_95'])),
+        ("  Avg max drawdown",             pct(st['avg_max_dd']*100)),
+        ("  Annualised Sharpe (sim)",      flt(st['sharpe'])),
+        ("", ""),
+        ("── Return probabilities ──",     ""),
+        ("  P(price rises at all)",        pct(st['prob_up'])),
+        ("  P(price +5%  or more)",        pct(st['prob_up5'])),
+        ("  P(price +10% or more)",        pct(st['prob_up10'])),
+        ("  P(price +20% or more)",        pct(st['prob_up20'])),
+        ("  P(price -5%  or worse)",       pct(st['prob_down5'])),
+        ("  P(price -10% or worse)",       pct(st['prob_down10'])),
+        ("  P(price -20% or worse)",       pct(st['prob_down20'])),
+        ("  Expected return at horizon",   pct(st['exp_ret_pct'])),
+    ]
+    for label, value in rows:
+        if label == "":
+            print()
+        elif value == "":
+            print(f"  {label}")
+        else:
+            print(f"  {label:<38} {value}")
+    print(f"{'═'*w}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 7 — VISUALISATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Colour palette
+BLUE   = "#185FA5"
+RED    = "#E24B4A"
+GREEN  = "#1D9E75"
+AMBER  = "#BA7517"
+PURPLE = "#534AB7"
+GRAY   = "#888888"
+
+
+def _pct_bands(paths: np.ndarray):
+    """Return (p5, p25, median, p75, p95) day-by-day."""
+    return (
+        np.percentile(paths,  5, axis=0),
+        np.percentile(paths, 25, axis=0),
+        np.median(paths,        axis=0),
+        np.percentile(paths, 75, axis=0),
+        np.percentile(paths, 95, axis=0),
+    )
+
+
+def _style_ax(ax):
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(alpha=0.15, linewidth=0.5, linestyle="--")
+    ax.tick_params(labelsize=8)
+
+
+# ── Chart 1: Full simulation dashboard ────────────────────────────────────────
+
+def plot_simulation_dashboard(
+    results:        Dict[str, np.ndarray],
+    com_configs:    Dict[str, CommodityConfig],
+    historical:     Dict[str, pd.Series],
+    scenario:       GeoScenario,
+    save_path:      Optional[str] = None,
+) -> None:
+    """
+    3-row × 3-column figure:
+      Row 0: 2-year historical price chart
+      Row 1: Monte Carlo fan chart (simulated paths)
+      Row 2: Final-price return distribution with stats overlay
+    """
+    symbols = list(results.keys())
+    ncols   = len(symbols)
+
+    fig = plt.figure(figsize=(9 * ncols, 13), facecolor="white")
+    fig.suptitle(
+        f"Commodity Monte Carlo Simulation  —  Iran-Israel Conflict\n"
+        f"Scenario: {scenario.label}   |   "
+        f"{results[symbols[0]].shape[0]:,} paths  ×  "
+        f"{results[symbols[0]].shape[1]-1} trading days",
+        fontsize=14, fontweight="bold", y=1.01,
+    )
+
+    gs = gridspec.GridSpec(
+        3, ncols,
+        figure=fig,
+        hspace=0.52,
+        wspace=0.32,
+        height_ratios=[1, 2.2, 1.4],
+    )
+
+    for col, sym in enumerate(symbols):
+        cc    = com_configs[sym]
+        paths = results[sym]
+        T     = paths.shape[1] - 1
+        days  = np.arange(T + 1)
+        st    = compute_statistics(paths, cc.spot)
+        p5, p25, med, p75, p95 = _pct_bands(paths)
+
+        # ── Row 0: historical price ──────────────────────────────────────────
+        ax0 = fig.add_subplot(gs[0, col])
+        hist_s = historical.get(sym)
+        if hist_s is not None and not hist_s.empty:
+            h = hist_s.iloc[-504:]   # last ~2 trading years
+            ax0.plot(h.index, h.values, lw=1.3, color=BLUE, alpha=0.9)
+            ax0.fill_between(h.index, h.values, h.values.min(),
+                             alpha=0.08, color=BLUE)
+            # mark last point
+            ax0.scatter([h.index[-1]], [h.iloc[-1]], color=BLUE, s=30, zorder=5)
+            ax0.set_xlabel("", fontsize=8)
+            ax0.xaxis.set_major_formatter(
+                matplotlib.dates.DateFormatter("%b '%y")
+            )
+            plt.setp(ax0.xaxis.get_majorticklabels(), rotation=30, ha="right")
+        else:
+            ax0.text(0.5, 0.5, "No historical data",
+                     ha="center", va="center", transform=ax0.transAxes,
+                     fontsize=10, color=GRAY)
+        ax0.set_title(f"{cc.name}", fontsize=12, fontweight="bold", pad=7)
+        ax0.set_ylabel(f"Price ({cc.unit})", fontsize=9)
+        _style_ax(ax0)
+
+        # ── Row 1: Monte Carlo fan chart ─────────────────────────────────────
+        ax1 = fig.add_subplot(gs[1, col])
+        ax1.fill_between(days, p5,  p95, alpha=0.11, color=BLUE, label="90% CI")
+        ax1.fill_between(days, p25, p75, alpha=0.26, color=BLUE, label="50% CI")
+        ax1.plot(days, med, color=BLUE,  lw=2.5, label="Median")
+        ax1.plot(days, p95, color=RED,   lw=1.2, ls="--", label="95th pct")
+        ax1.plot(days, p5,  color=GREEN, lw=1.2, ls="--", label="5th pct")
+        ax1.axhline(cc.spot, color=GRAY, lw=1.0, ls=":", alpha=0.7, label="Spot today")
+
+        ax1.set_title(
+            f"Simulation  ·  μ={st['exp_ret_pct']:+.1f}%  "
+            f"σ={st['ann_vol_sim']*100:.1f}%  "
+            f"Sharpe={st['sharpe']:.2f}",
+            fontsize=9, pad=5,
+        )
+        ax1.set_xlabel("Trading days", fontsize=9)
+        ax1.set_ylabel(f"Price ({cc.unit})", fontsize=9)
+        _style_ax(ax1)
+
+        if col == 0:
+            legend_els = [
+                Line2D([0],[0], color=BLUE,  lw=2.5,  label="Median"),
+                Line2D([0],[0], color=RED,   lw=1.2,  ls="--", label="95th pct"),
+                Line2D([0],[0], color=GREEN, lw=1.2,  ls="--", label="5th pct"),
+                Patch(facecolor=BLUE, alpha=0.26, label="50% CI"),
+                Patch(facecolor=BLUE, alpha=0.11, label="90% CI"),
+                Line2D([0],[0], color=GRAY, lw=1.0, ls=":", label="Spot today"),
+            ]
+            ax1.legend(handles=legend_els, fontsize=8,
+                       loc="upper left", framealpha=0.92)
+
+        # ── Row 2: return distribution histogram ─────────────────────────────
+        ax2 = fig.add_subplot(gs[2, col])
+        final   = paths[:, -1]
+        returns = (final / cc.spot - 1) * 100
+        n_bins  = 55
+        counts, edges = np.histogram(returns, bins=n_bins)
+        centers = (edges[:-1] + edges[1:]) / 2
+        bw      = edges[1] - edges[0]
+
+        bar_colors = np.where(
+            centers < -10, RED,
+            np.where(centers > 10, GREEN, BLUE)
+        )
+        ax2.bar(centers, counts, width=bw * 0.88,
+                color=bar_colors, alpha=0.78, edgecolor="none")
+
+        ax2.axvline(0,                  color=GRAY, lw=1.0, ls=":",  alpha=0.8)
+        ax2.axvline(np.median(returns), color=BLUE, lw=1.5, ls="--", alpha=0.9,
+                    label=f"Median {np.median(returns):+.1f}%")
+
+        # overlay normal PDF if scipy available
+        if SCIPY_AVAILABLE and len(returns) > 30:
+            xr = np.linspace(returns.min(), returns.max(), 300)
+            pdf = scipy_stats.norm.pdf(xr, returns.mean(), returns.std())
+            scale = counts.max() / pdf.max() * 0.88
+            ax2.plot(xr, pdf * scale, lw=1.5, color="#333", alpha=0.45,
+                     ls="-", label="Normal fit")
+
+        ax2.set_title(
+            f"Return distribution  ·  VaR95={cc.unit}{st['var_loss']:.{cc.decimals}f}",
+            fontsize=9, pad=5,
+        )
+        ax2.set_xlabel(f"Return at day {T} (%)", fontsize=9)
+        ax2.set_ylabel("Frequency", fontsize=9)
+        _style_ax(ax2)
+        ax2.grid(alpha=0.15, axis="y")
+        ax2.legend(fontsize=8, framealpha=0.9)
+
+        # stats annotation box
+        ann_text = (
+            f"P(>+5%):   {st['prob_up5']:.1f}%\n"
+            f"P(>+10%): {st['prob_up10']:.1f}%\n"
+            f"P(<-5%):   {st['prob_down5']:.1f}%\n"
+            f"P(<-10%): {st['prob_down10']:.1f}%\n"
+            f"Avg MaxDD: {st['avg_max_dd']*100:.1f}%"
+        )
+        ax2.text(0.98, 0.97, ann_text,
+                 transform=ax2.transAxes, fontsize=7.5,
+                 va="top", ha="right",
+                 bbox=dict(boxstyle="round,pad=0.4",
+                           fc="white", ec="#cccccc", alpha=0.92))
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"  Chart 1 saved  →  {save_path}")
+    plt.show()
+
+
+# ── Chart 2: Scenario comparison ──────────────────────────────────────────────
+
+def plot_scenario_comparison(
+    com_configs:  Dict[str, CommodityConfig],
+    n_paths:      int = 500,
+    horizon_days: int = 90,
+    save_path:    Optional[str] = None,
+) -> None:
+    """
+    One subplot per commodity.
+    Each subplot shows median price paths for all five scenarios.
+    """
+    sc_colors = {
+        "Base case":         BLUE,
+        "Mild escalation":   AMBER,
+        "Severe escalation": "#D85A30",
+        "Strait closure":    RED,
+        "De-escalation":     GREEN,
+    }
+    symbols = list(com_configs.keys())
+    fig, axes = plt.subplots(
+        1, len(symbols),
+        figsize=(9 * len(symbols), 5.5),
+        facecolor="white",
+    )
+    if len(symbols) == 1:
+        axes = [axes]
+
+    fig.suptitle(
+        "Scenario Comparison — Median Price Paths  (Iran-Israel Conflict)",
+        fontsize=14, fontweight="bold",
+    )
+
+    for ax, sym in zip(axes, symbols):
+        cc = com_configs[sym]
+        for sc_name, geo in SCENARIOS.items():
+            paths = run_monte_carlo(
+                cc, geo,
+                n_paths=n_paths,
+                horizon_days=horizon_days,
+                seed=99,
+            )
+            med  = np.median(paths, axis=0)
+            p25  = np.percentile(paths, 25, axis=0)
+            p75  = np.percentile(paths, 75, axis=0)
+            days = np.arange(len(med))
+            clr  = sc_colors[sc_name]
+            ax.plot(days, med, lw=2.2, color=clr, label=sc_name)
+            ax.fill_between(days, p25, p75, alpha=0.08, color=clr)
+
+        ax.axhline(cc.spot, color=GRAY, lw=1.0, ls=":", alpha=0.8, label="Spot today")
+        ax.set_title(cc.name, fontsize=12, fontweight="bold")
+        ax.set_xlabel("Trading days")
+        ax.set_ylabel(f"Price ({cc.unit})")
+        ax.legend(fontsize=9, framealpha=0.92)
+        _style_ax(ax)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"  Chart 2 saved  →  {save_path}")
+    plt.show()
+
+
+# ── Chart 3: Return correlation heatmap ───────────────────────────────────────
+
+def plot_correlation_heatmap(
+    md:        MarketData,
+    save_path: Optional[str] = None,
+) -> None:
+    """
+    Pairwise Pearson correlation of daily log-returns.
+    Includes commodities, VIX, and USD index for context.
+    """
+    key_map = {
+        "OIL":  "WTI Oil",
+        "GAS":  "Nat Gas",
+        "GOLD": "Gold",
+        "VIX":  "VIX",
+        "DXY":  "USD Index",
+        "XLE":  "Energy ETF",
+        "GLD":  "Gold ETF",
+    }
+    available = [k for k in key_map if k in md.returns]
+    if len(available) < 2:
+        print("  ⚠  Not enough return series for correlation heatmap — skipped.")
+        return
+
+    df = pd.concat(
+        [md.returns[k].rename(key_map[k]) for k in available],
+        axis=1,
+    ).dropna()
+    corr = df.corr()
+
+    fig, ax = plt.subplots(figsize=(7, 6), facecolor="white")
+    n  = len(corr)
+    im = ax.imshow(corr.values, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
+    cbar = plt.colorbar(im, ax=ax, shrink=0.80, pad=0.02)
+    cbar.ax.tick_params(labelsize=9)
+    cbar.set_label("Pearson r", fontsize=9)
+
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+    ax.set_xticklabels(corr.columns, rotation=35, ha="right", fontsize=10)
+    ax.set_yticklabels(corr.index,   fontsize=10)
+    ax.set_title(
+        "Daily Return Correlation Matrix  (live data)",
+        fontsize=12, fontweight="bold", pad=12,
+    )
+
+    for i in range(n):
+        for j in range(n):
+            val = corr.values[i, j]
+            ax.text(
+                j, i, f"{val:.2f}",
+                ha="center", va="center", fontsize=9,
+                color="white" if abs(val) > 0.45 else "black",
+            )
+
+    ax.spines[:].set_visible(False)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"  Chart 3 saved  →  {save_path}")
+    plt.show()
+
+
+# ── Chart 4: Historical volatility vs. implied vol ────────────────────────────
+
+def plot_volatility_regimes(
+    md:         MarketData,
+    save_path:  Optional[str] = None,
+) -> None:
+    """
+    Rolling 30-day realised vol for oil, gas, gold  +  OVX / VIX levels.
+    Useful for understanding whether current vol is elevated or compressed.
+    """
+    fig, axes = plt.subplots(3, 1, figsize=(12, 9), facecolor="white", sharex=False)
+    fig.suptitle(
+        "Historical Volatility Regimes  (30-day rolling annualised σ)",
+        fontsize=13, fontweight="bold",
+    )
+
+    pairs = [
+        ("OIL",  "WTI Crude Oil",  BLUE,   "OVX",  "OVX implied"),
+        ("GAS",  "Natural Gas",    AMBER,  None,   None),
+        ("GOLD", "Gold",           GREEN,  "VIX",  "VIX (proxy)"),
+    ]
+    for ax, (sym, label, clr, vol_key, vol_label) in zip(axes, pairs):
+        if sym not in md.returns or md.returns[sym].empty:
+            ax.text(0.5, 0.5, f"No data for {sym}",
+                    ha="center", va="center", transform=ax.transAxes,
+                    fontsize=11, color=GRAY)
+            ax.set_title(label, fontsize=11)
+            continue
+
+        rv = md.returns[sym].rolling(30).std() * np.sqrt(TRADING_DAYS) * 100
+        ax.plot(rv.index, rv.values, lw=1.5, color=clr, label="Realised vol (30d)")
+        ax.fill_between(rv.index, rv.values, alpha=0.10, color=clr)
+
+        if vol_key and vol_key in md.close and not md.close[vol_key].empty:
+            iv = md.close[vol_key].reindex(rv.index, method="ffill")
+            ax.plot(iv.index, iv.values, lw=1.3, color=RED,
+                    ls="--", alpha=0.75, label=vol_label)
+
+        ax.set_title(label, fontsize=11, fontweight="bold")
+        ax.set_ylabel("Annualised vol (%)", fontsize=9)
+        ax.legend(fontsize=8, framealpha=0.9)
+        _style_ax(ax)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"  Chart 4 saved  →  {save_path}")
+    plt.show()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 8 — MAIN
+# ══════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  USER SETTINGS  ← edit these
+    # ─────────────────────────────────────────────────────────────────────────
+
+    ACTIVE_SCENARIO = "Mild escalation"
+    # Options: "Base case" | "Mild escalation" | "Severe escalation"
+    #          "Strait closure" | "De-escalation"
+
+    N_PATHS      = 1000    # number of Monte Carlo paths  (try 500 for speed)
+    HORIZON_DAYS = 90      # forecast horizon in trading days
+    SEED         = 42      # reproducibility seed  (set None for random)
+
+    OUTPUT_DIR   = "."     # where to save PNG charts
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Step 1 — fetch live data
+    md = load_all_data()
+
+    # Step 2 — calibrate commodity parameters from live data
+    com_configs = build_commodity_configs(md)
+
+    print("\n  ── Calibrated commodity parameters (from live data) ─────────────")
+    for sym, cc in com_configs.items():
+        print(
+            f"  {cc.name:<22}  "
+            f"spot={cc.unit}{cc.spot:>10,.{cc.decimals}f}  "
+            f"σ={cc.sigma*100:5.1f}%  "
+            f"μ={cc.drift*100:+5.1f}%  "
+            f"imp_vol={cc.implied_vol*100:5.1f}%"
+        )
+
+    # Step 3 — select scenario
+    geo = SCENARIOS[ACTIVE_SCENARIO]
+    print(f"\n  ── Active scenario: {geo.label} ─────────────────────────────────")
+    print(f"  {geo.description}")
+    print(
+        f"  Escalation prob (daily): {geo.escalation_prob_daily*100:.1f}%  "
+        f"  Shock mean: {geo.shock_magnitude_mean*100:.0f}%\n"
+        f"  Strait closure prob (daily): {geo.strait_prob_daily*100:.1f}%  "
+        f"  Oil impact: {geo.strait_impact_oil*100:.0f}%  "
+        f"  Gas impact: {geo.strait_impact_gas*100:.0f}%  "
+        f"  Gold impact: {geo.strait_impact_gold*100:.0f}%"
+    )
+
+    # Step 4 — run simulations
+    print(
+        f"\n  Running Monte Carlo  ({N_PATHS:,} paths × {HORIZON_DAYS} days)…\n"
+    )
+    results: Dict[str, np.ndarray] = {}
+    for sym, cc in com_configs.items():
+        print(f"  Simulating {cc.name}…")
+        paths = run_monte_carlo(
+            cc, geo,
+            n_paths=N_PATHS,
+            horizon_days=HORIZON_DAYS,
+            seed=SEED,
+        )
+        results[sym] = paths
+        st = compute_statistics(paths, cc.spot)
+        print_statistics(st, cc.name, unit=cc.unit, decimals=cc.decimals)
+
+    # Step 5 — assemble historical series for the top chart row
+    historical: Dict[str, pd.Series] = {
+        "OIL":  md.close.get("OIL",  md.fred.get("wti_spot",  pd.Series(dtype=float))),
+        "GAS":  md.close.get("GAS",  md.fred.get("natgas_spot", pd.Series(dtype=float))),
+        "GOLD": md.close.get("GOLD", md.fred.get("gold_fix",  pd.Series(dtype=float))),
+    }
+
+    # Step 6 — produce charts
+    print("\n  Rendering charts…\n")
+
+    plot_simulation_dashboard(
+        results=results,
+        com_configs=com_configs,
+        historical=historical,
+        scenario=geo,
+        save_path=os.path.join(OUTPUT_DIR, "01_simulation_dashboard.png"),
+    )
+
+    plot_scenario_comparison(
+        com_configs=com_configs,
+        n_paths=500,
+        horizon_days=HORIZON_DAYS,
+        save_path=os.path.join(OUTPUT_DIR, "02_scenario_comparison.png"),
+    )
+
+    plot_correlation_heatmap(
+        md=md,
+        save_path=os.path.join(OUTPUT_DIR, "03_correlation_heatmap.png"),
+    )
+
+    plot_volatility_regimes(
+        md=md,
+        save_path=os.path.join(OUTPUT_DIR, "04_volatility_regimes.png"),
+    )
+
+    print("\n✅  All done.  Four charts saved.\n")
