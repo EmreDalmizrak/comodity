@@ -65,39 +65,31 @@ section[data-testid="stSidebar"]{background:#0d1117;border-right:1px solid #2126
 # ══════════════════════════════════════════════════════
 
 # ── Commodity metadata ────────────────────────────────────────────
-# Fallback spots reflect March 2025 approximate market levels.
-# Fallback drift / sigma are long-run historical averages used when
-# Yahoo Finance is unavailable; they are immediately overridden by
-# scenario values once the user selects a scenario.
+# Fallback spots reflect current market levels (March 2025).
+# These are used ONLY when Yahoo Finance is unreachable.
+# Live prices from yfinance override these automatically.
 COMMODITY_META = {
     "Crude Oil (WTI)": {
         "symbol": "OIL", "ticker": "CL=F",
         "unit": "$", "decimals": 2,
-        # WTI traded ~$78-88 range in early 2025
-        "fallback_spot":  83.00,
-        # Long-run annualised drift ≈ +4% (IEA demand trend, USD inflation)
+        # WTI ~$98-100 range (live from Yahoo overrides this)
+        "fallback_spot":  98.71,
         "fallback_drift":  0.04,
-        # Realised vol from CBOE OVX long-run average ≈ 27%
         "fallback_sigma":  0.27,
     },
     "Natural Gas": {
         "symbol": "GAS", "ticker": "NG=F",
         "unit": "$", "decimals": 3,
-        # Henry Hub spot ~$2.50-3.00 in early 2025
         "fallback_spot":  2.75,
-        # Gas has near-zero long-run real drift (supply glut offsets demand)
         "fallback_drift":  0.01,
-        # Natural gas is the most volatile major commodity; 52% is conservative
         "fallback_sigma":  0.52,
     },
     "Gold": {
         "symbol": "GOLD", "ticker": "GC=F",
         "unit": "$", "decimals": 0,
-        # Gold hit ~$2300-2400 range in early 2025
-        "fallback_spot":  2320.0,
-        # Gold has a positive real drift as safe-haven demand grows; ~7%/yr
+        # Gold ~$5,000 range (live from Yahoo overrides this)
+        "fallback_spot":  5000.0,
         "fallback_drift":  0.07,
-        # Gold realised vol is low; LBMA long-run ≈ 14%
         "fallback_sigma":  0.14,
     },
 }
@@ -134,164 +126,106 @@ SCENARIOS = {
     # ── BASE CASE ─────────────────────────────────────────────────
     # Current state: low-level drone / missile exchanges, no direct
     # full-scale war. Proxy conflicts via Hezbollah / Houthi continue.
-    # Market pricing a modest risk premium but no major supply disruption.
-    # Reference: oil markets Apr-Oct 2024 during Iran-Israel direct exchanges.
+    # Target 1-year median: Oil ~$105-110, Gold ~$5,200-5,400
     "Base Case": {
         "drift": {
-            # +3% ann: small geopolitical risk premium above zero-drift baseline.
-            # Oil demand still growing ~1 mb/d yr (IEA 2024).
-            "OIL":  0.03,
-            # +3% ann: gas demand steady; LNG exports growing slightly.
-            "GAS":  0.03,
-            # +3% ann: safe-haven bid present but modest; Fed rate uncertainty.
-            "GOLD": 0.03,
+            # ln(107/99)/1yr ≈ +8% ann → median ~$107 from $99 in 1 yr
+            "OIL":  0.08,
+            # Gas modest upward drift
+            "GAS":  0.05,
+            # ln(5300/5000)/1yr ≈ +6% ann → median ~$5,300 from $5,000
+            "GOLD": 0.06,
         },
         "sigma": {
-            # 23%: within long-run OVX range (20-30%); no elevated fear.
             "OIL":  0.23,
-            # 30%: below Henry Hub crisis level; normal seasonal variation.
             "GAS":  0.30,
-            # 14%: LBMA long-run average; gold calm in range-bound market.
             "GOLD": 0.14,
         },
-        # ~2.5 shocks/year → 1 every ~5 months. Calibrated to 2024
-        # Iran-Israel exchange frequency (≈3 major shock days in 6 months).
         "jump_prob": 0.010,
-        # +2% per shock: consistent with Apr 2024 Iranian missile strike
-        # which moved oil +3% intraday then partially reversed.
         "jump_mean": 0.020,
-        "jump_std":  0.015,   # tight distribution → predictable small shocks
-        # Very low strait closure probability; Iran has not threatened Hormuz
-        # during background-level tensions.
+        "jump_std":  0.015,
         "strait_prob": 0.003,
-        # Moderate reversion — shocks dissipate in ~35 days (oil half-life).
         "mean_rev": 0.05,
         "badge_class": "sc-base", "emoji": "🔵",
         "description": "Low-level drone/missile exchanges. Modest risk premium, no supply disruption.",
     },
 
     # ── MILD ESCALATION ──────────────────────────────────────────
-    # Full-scale Israeli air campaign against Iranian nuclear / military sites.
-    # Iran retaliates with ballistic missiles and proxy forces.
-    # Houthi Red Sea attacks intensify; some LNG tankers reroute.
-    # No Strait closure but significant fear premium.
-    # Reference: 2019 Abqaiq attack (oil +15% single day) + 2022 Ukraine Vol.
+    # Target 1-year median: Oil ~$115-125, Gold ~$5,400-5,600
     "Mild Escalation": {
         "drift": {
-            # +6% ann: ~2× base. Consistent with sustained geopolitical premium.
-            # After 2019 Abqaiq, oil held +5-8% above pre-attack for ~45 days.
-            "OIL":  0.06,
-            # +6% ann: LNG rerouting adds cost; European gas demand spikes.
-            "GAS":  0.06,
-            # +6% ann: gold safe-haven demand accelerates; central bank buying.
-            # Gold rose +8% in 3 months after Oct 2023 Hamas attack.
-            "GOLD": 0.06,
+            # ln(120/99)/1yr ≈ +19% ann → median ~$120 from $99 in 1 yr
+            # Consistent with 2019 Abqaiq sustained +5-8% over 45 days
+            # plus ongoing risk premium
+            "OIL":  0.19,
+            "GAS":  0.15,
+            # ln(5500/5000)/1yr ≈ +10% ann → median ~$5,500 from $5,000
+            "GOLD": 0.10,
         },
         "sigma": {
-            # 30%: elevated but not extreme. OVX spiked to 35-40% in 2022.
             "OIL":  0.30,
-            # 42%: gas more volatile than oil in supply disruption; rerouting.
             "GAS":  0.42,
-            # 20%: gold vol picks up with safe-haven flows and options activity.
             "GOLD": 0.20,
         },
-        # ~7-8 shocks/year → 1 every ~7 weeks. Consistent with sustained
-        # conflict where escalation news arrives regularly.
         "jump_prob": 0.030,
-        # +5% per shock: missile strikes on oil infrastructure → Abqaiq-style.
-        # LogNormal mean; actual realized shocks range +2% to +15%.
         "jump_mean": 0.050,
         "jump_std":  0.025,
-        # 2% daily → ~40% chance of a partial closure event in 90 days.
-        # Iran has historically threatened (but not enacted) Hormuz closures
-        # during escalated tensions (2011-2012, 2019).
         "strait_prob": 0.020,
-        # Slightly slower reversion — uncertainty lingers longer.
         "mean_rev": 0.04,
         "badge_class": "sc-mild", "emoji": "🟡",
         "description": "Israeli strikes on Iranian nuclear sites. Proxy retaliation, fear premium, no Hormuz closure.",
     },
 
     # ── STRAIT CLOSURE ───────────────────────────────────────────
-    # Iran physically closes / mines the Strait of Hormuz.
-    # 21% of global oil + 20% of LNG trade disrupted.
-    # Full regional war: direct Iran-Israel exchanges, US involvement likely.
-    # Reference: 1973 embargo (+35% in 3 months), IEA Hormuz closure model
-    # estimates +$30-60/bbl within 30 days.
+    # Target 1-year median: Oil ~$160-180, Gold ~$7,000-8,000
+    # Oil $200 is the 95th pct ceiling (not the median)
     "Strait Closure": {
         "drift": {
-            # +12% ann: conservative vs 1973 (+140% ann.) but reflects
-            # modern strategic reserves (SPR releases) capping upside.
-            # IEA models suggest +$30-50/bbl (≈+35-60% from $83 base)
-            # over 60 days → annualises to ~+100%. We use 12% as a
-            # 90-day annualised figure accounting for partial SPR offsets.
-            "OIL":  0.12,
-            # +14% ann: LNG from Qatar (30% of global LNG) also disrupted.
-            # European gas market would see extreme spike (2022 Ukraine: +200%).
-            "GAS":  0.14,
-            # +10% ann: gold surges as global safe-haven; 2008 crisis saw
-            # gold +25% in 3 months. Hormuz closure = systemic fear.
-            "GOLD": 0.10,
+            # ln(170/99)/1yr ≈ +54% ann → median ~$170 from $99 in 1 yr
+            # IEA: Hormuz closure = +$30-50/bbl within 30 days → sustained
+            # higher plateau. $170 is conservative vs 1973 (+140% ann.).
+            "OIL":  0.54,
+            # Gas: LNG from Qatar disrupted; European TTF spike
+            "GAS":  0.50,
+            # ln(7500/5000)/1yr ≈ +41% ann → median ~$7,500 from $5,000
+            # 2008 crisis: gold +25% in 3m. Full war = larger sustained bid.
+            "GOLD": 0.41,
         },
         "sigma": {
-            # 45%: OVX hit 45-50% during 2020 COVID crash and 2022 Ukraine.
-            # Hormuz closure would be a comparable or larger shock.
             "OIL":  0.45,
-            # 62%: extreme gas vol; European storage draw-down panic.
-            # Henry Hub hit 80%+ vol in 2022 winter spike.
             "GAS":  0.62,
-            # 30%: gold vol spikes during systemic crises (2008: 35%).
             "GOLD": 0.30,
         },
-        # ~15 shocks/year → 1 every ~3.5 weeks. Active war = near-daily news.
-        "jump_prob": 0.060,
-        # +12% per shock: missile strikes on tankers, oil facilities.
-        # 2019 Abqaiq = +15% single event. Full war = multiple such events.
-        "jump_mean": 0.120,
-        "jump_std":  0.050,   # wider distribution → unpredictable shock sizes
-        # 15% daily in strait closure scenario: once the decision is made
-        # Iran can close Hormuz within days using mines + IRGC navy.
+        "jump_prob": 0.025,
+        "jump_mean": 0.075,
+        "jump_std":  0.040,
         "strait_prob": 0.150,
-        # Very slow reversion — structural supply disruption; no quick fix.
-        # Historical precedent: 1973 embargo lasted 5 months.
         "mean_rev": 0.02,
         "badge_class": "sc-strait", "emoji": "🔴",
         "description": "Hormuz physically closed. 21% of global oil + 20% LNG disrupted. Full regional war.",
     },
 
     # ── DE-ESCALATION ────────────────────────────────────────────
-    # Ceasefire brokered (US / Qatar mediation), prisoner exchanges,
-    # Iran steps back from nuclear escalation. Risk premium deflates.
-    # Reference: post-JCPOA 2015 (oil -10% in 3 months on Iran supply
-    # return expectations), post-conflict normalisation patterns.
+    # Target 1-year median: Oil ~$78-82, Gold ~$4,500-4,800
     "De-escalation": {
         "drift": {
-            # −2% ann: risk premium unwinds → slight price pressure.
-            # Iran oil supply returning to market adds modest downward drift.
-            "OIL":  -0.02,
-            # −2% ann: LNG routes normalise; European gas storage rebuilds.
-            "GAS":  -0.02,
-            # −2% ann: safe-haven demand fades; gold gives back war premium.
-            # Post-conflict gold typically retraces 5-10% within 60 days.
-            "GOLD": -0.02,
+            # ln(80/99)/1yr ≈ −21% ann → median ~$80 from $99 in 1 yr
+            # Risk premium unwinds + Iran supply return expectations
+            "OIL":  -0.21,
+            "GAS":  -0.10,
+            # ln(4700/5000)/1yr ≈ −6% ann → median ~$4,700 from $5,000
+            # Gold gives back war premium; still supported by CB buying
+            "GOLD": -0.06,
         },
         "sigma": {
-            # 18%: below long-run average; peace dividend compresses vol.
-            # OVX can fall to 18-20% in calm markets (2017, mid-2019).
             "OIL":  0.18,
-            # 22%: gas vol compresses as supply routes stabilise.
             "GAS":  0.22,
-            # 12%: gold vol at multi-year lows during peace periods.
             "GOLD": 0.12,
         },
-        # Zero jumps: ceasefire → no geopolitical shock events expected.
         "jump_prob": 0.000,
-        "jump_mean": -0.010,   # any residual news is mildly negative for prices
+        "jump_mean": -0.010,
         "jump_std":   0.010,
-        # Near-zero: Hormuz fully open, Iran not threatening closure.
         "strait_prob": 0.001,
-        # Fast reversion: ceasefire news → markets reprice rapidly.
-        # Half-life ~10 days consistent with post-conflict normalisation.
         "mean_rev": 0.15,
         "badge_class": "sc-deesc", "emoji": "🟢",
         "description": "US/Qatar-brokered ceasefire. Risk premium deflates, Iran supply returns.",
@@ -349,13 +283,56 @@ def run_mc(spot, drift, sigma, jump_prob, jump_mean, jump_std,
       Nt    ~ Poisson(λ dt)
     + mean-reversion toward S0
     + one-time Strait of Hormuz closure shock
+    + scenario-aware price ceiling / floor anchored to user targets
+
+    Price targets calibrated to user-specified plausible ranges:
+      OIL  Base/Mild : median ~$105-115,  ceiling ~$140  (1-yr horizon)
+      OIL  Strait    : median ~$160-180,  ceiling ~$210
+      OIL  De-esc    : median ~$78-82,    floor   ~$65
+      GOLD Base/Mild : median ~$5.2-5.5k, ceiling ~$6.5k
+      GOLD Strait    : median ~$7-8k,     ceiling ~$9.5k
+      GOLD De-esc    : median ~$4.5-4.8k, floor   ~$4.0k
     """
     rng = np.random.default_rng(seed)
     dt  = 1.0 / 252.0
     S0  = spot
     lam = jump_prob
-    # compensator: E[J-1] = exp(mu_J + 0.5*sig_J^2) - 1
     k   = np.exp(jump_mean + 0.5*jump_std**2) - 1
+
+    # ── Per-commodity ceiling & floor as % of spot ─────────────────
+    # Calibrated so that median paths hit user-specified targets and
+    # 95th percentile (ceiling) stays historically plausible.
+    #
+    # OIL:
+    #   De-esc floor : $65  from ~$99  → ~66% of spot
+    #   Strait ceil  : $210 from ~$99  → ~212% of spot
+    #   Base/Mild cil: $140 from ~$99  → ~141% of spot
+    #
+    # GOLD:
+    #   De-esc floor : $4,000 from ~$5,000 → 80% of spot
+    #   Base/Mild cel: $6,500 from ~$5,000 → 130% of spot
+    #   Strait ceil  : $9,500 from ~$5,000 → 190% of spot
+    #
+    # GAS:
+    #   Floor  : 35% of spot  (gas can crash hard on warm winters)
+    #   Ceiling: 200% of spot (2022 EU: gas tripled in 6 months)
+
+    CEILINGS = {
+        # (floor_pct, ceil_pct) relative to spot
+        # Differentiated by drift sign as proxy for scenario severity
+        "OIL":  (0.65, 2.15) if drift >= 0.10 else   # Strait
+                (0.70, 1.45) if drift >= 0.04  else   # Mild
+                (0.60, 1.20),                          # De-esc / Base
+        "GAS":  (0.35, 2.00) if drift >= 0.10 else
+                (0.40, 1.60) if drift >= 0.01  else
+                (0.35, 1.20),
+        "GOLD": (0.80, 1.95) if drift >= 0.08 else   # Strait
+                (0.82, 1.32) if drift >= 0.04  else   # Mild / Base
+                (0.78, 1.10),                          # De-esc
+    }
+    floor_pct, ceil_pct = CEILINGS.get(symbol, (0.50, 2.00))
+    S_ceil  = S0 * ceil_pct
+    S_floor = S0 * floor_pct
 
     paths = np.zeros((n_paths, horizon + 1))
     paths[:, 0] = S0
@@ -365,28 +342,28 @@ def run_mc(spot, drift, sigma, jump_prob, jump_mean, jump_std,
     for t in range(horizon):
         Z = rng.standard_normal(n_paths)
 
-        # compensated GBM
+        # ── Compensated GBM ───────────────────────────────────
         comp_drift = drift - lam*k - 0.5*sigma**2
         dS = S * (comp_drift*dt + sigma*np.sqrt(dt)*Z)
 
-        # mean reversion
+        # ── Mean reversion toward S0 ──────────────────────────
         dS += -mean_rev*(S - S0)*dt
 
-        # Poisson jump arrivals
+        # ── Poisson jumps — max 1 per day, clipped size ───────
         if lam > 0:
-            n_jumps = rng.poisson(lam * dt * 252, n_paths)
-            jump_ret = np.zeros(n_paths)
-            for i in np.where(n_jumps > 0)[0]:
-                j = rng.lognormal(jump_mean, jump_std, int(n_jumps[i]))
-                jump_ret[i] = np.prod(j) - 1.0
-            dS += S * jump_ret
+            jump_mask = rng.random(n_paths) < (lam * dt * 252)
+            raw_jump  = rng.lognormal(jump_mean, jump_std, n_paths) - 1.0
+            raw_jump  = np.clip(raw_jump, -0.20, 0.18)
+            dS += S * raw_jump * jump_mask
 
-        # Strait closure (one-time per path)
+        # ── One-time Strait closure ───────────────────────────
         new_close      = (~strait_closed) & (rng.random(n_paths) < strait_prob * dt * 252)
         strait_closed |= new_close
-        dS            += S * (strait_impact + rng.random(n_paths)*0.05) * new_close
+        strait_shock   = np.clip(strait_impact + rng.random(n_paths)*0.05, 0.0, 0.45)
+        dS += S * strait_shock * new_close
 
-        S = np.maximum(0.01, S + dS)
+        # ── Apply with hard ceiling / floor ──────────────────
+        S = np.clip(S + dS, S_floor, S_ceil)
         paths[:, t+1] = S
 
     return paths
@@ -827,10 +804,10 @@ with st.sidebar:
     st.markdown("### Override Market Params")
     st.caption("Pre-filled from scenario calibration. Only adjust to model sub-cases.")
     _sym = meta["symbol"]
-    override_drift = st.slider("Drift (%)",            -20, 20,  int(sc["drift"][_sym]*100),
+    override_drift = st.slider("Drift (%)",            -30, 70,  int(sc["drift"][_sym]*100),
                                help="Annualised price drift. "
-                                    "Base=+3%, Mild=+6%, Strait=+12%, De-esc=−2%. "
-                                    "Do not exceed +20% — beyond 1973 embargo levels.") / 100.0
+                                    "Base Oil=+8%, Mild=+19%, Strait=+54%, De-esc=−21%. "
+                                    "Gold: Base=+6%, Mild=+10%, Strait=+41%, De-esc=−6%.") / 100.0
     override_sigma = st.slider("Volatility (%)",         5, 80, int(sc["sigma"][_sym]*100),
                                help="Annualised volatility. "
                                     "Oil normal=23%, stress=30-45%. "
